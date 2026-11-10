@@ -109,3 +109,34 @@ arm-eabi-4.4.3 工具鏈 SHA-256 `fe166ff8…`）；本探針驗的是整棵樹�
 - `scripts/in-container.sh` — 容器內裝年代環境＋降權
 - `scripts/build-as-user.sh` — envsetup／lunch／全量 make
 - `scripts/collect-report.sh` — 蒐集證據成 `report/` 並上傳
+- `.github/workflows/boot.yml` — 開機基線 workflow（手動觸發）
+- `scripts/boot-tree.sh` / `scripts/in-container-boot.sh` / `scripts/boot-as-user.sh` — 開機基線三段
+
+## 開機基線（未改造自編 GB 能否正常開機）
+
+結論：**能，四項里程碑全過**。方法：探針一同批流程全量編出的未改造映像
+（system.img／ramdisk.img／userdata.img），在同一個 Ubuntu 12.04 容器內以
+SDK r12 emulator（dl.google.com `android-sdk_r12-linux_x86.tgz`）＋樹內 prebuilt
+goldfish 內核 `prebuilt/android-arm/kernel/kernel-qemu` 啟動（成品
+`ro.product.cpu.abi=armeabi` → 選非 armv7 內核）。成品指紋
+`generic/generic/generic:2.3.7/GWK74/eng...:eng/test-keys`。
+
+決定性一跑：run 42754645850（2026-11-10 04:15 UTC 觸發，head 13d00a8），
+artifact `gb-boot-report`（id 13736410167）。里程碑（adb 輪詢時間軸）：
+
+- 20s：adb device 上線，init.svc.servicemanager／zygote／bootanim 皆 running
+- 31s：`sys.boot_completed=1`、bootanim stopped
+- M1 init＋init.rc ✓（ps 有 /init 為 pid 1、init.svc.* 一排 running）
+- M2 servicemanager＋zygote ✓（ps 實證 pid 27／32）
+- M3 system_server ✓（ps pid 68；logcat `I/SystemServer: Entered the Android system server!`）
+- M4 boot_completed ✓（logcat SurfaceFlinger `Boot is finished (13349 ms)`、Email 收到 BOOT_COMPLETED 廣播）
+
+調用踩坑（皆 emulator 組合問題、非映像／客體問題，各一輪修好）：
+
+1. run 42749100370：無 AVD 時 emulator 找不到 system 目錄直接退出 →
+   設 `ANDROID_PRODUCT_OUT=<abs product out>`（AOSP 開發流）＋ `-sysdir` 同址。
+2. run 42752130023：相對路徑的 `-system` 被 emulator 以 sysdir 為基準再拼一次、
+   路徑雙倍前綴 → kernel 與三個映像一律傳絕對路徑；並預建 `~/.android`。
+3. run 42754645850：全過（見上）。另：r12 的 `tools/emulator` 只是啟動器，
+   本體 `tools/emulator-arm` 只依賴 glibc 家族，SDL/X11 運行庫非必要
+   （workflow 內仍 best-effort 裝著備用）。
