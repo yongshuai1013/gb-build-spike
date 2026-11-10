@@ -50,6 +50,14 @@ android {
         }
     }
 
+    lint {
+        // targetSdk 28 is a hard design requirement (private-dir exec
+        // policy, see defaultConfig) and this APK is sideloaded from
+        // CI artifacts, never Play-distributed. Disable only the
+        // Play-oriented ExpiredTargetSdkVersion vital check.
+        disable 'ExpiredTargetSdkVersion'
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
