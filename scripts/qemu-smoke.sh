@@ -69,6 +69,62 @@ cat smoke-stdout.txt
 } > smoke-host-checks.txt 2>&1
 cat smoke-host-checks.txt
 
+
+# ---- Phase 2: guest init liveness + seccomp shield trace ----
+# Run the real guest init (static, gate ON) under qemu-user with
+# strace for a bounded window. qemu has no Android app seccomp
+# filter, so the shield is graded from the trace: the guest must
+# never ISSUE a syscall the host app policy denies - on a real
+# device issuing one is what killed the M1 guest init 3ms into its
+# first run (rc=159 = 128+SIGSYS, at its first mount()). Also
+# graded: init is still alive when the window ends (its main loop
+# never returns), and its boot log reached dev/console (log_init's
+# /dev/__kmsg__ is redirected there by the gate). Runs against a
+# copy: init creates device files and directories inside GBROOT,
+# and the assembled rootfs/ tree must stay pristine.
+GB2="$PWD/rootfs-init-test"
+rm -rf "$GB2"
+cp -a "$ROOTFS" "$GB2"
+: > "$GB2/dev/console"
+OUT="$PWD"
+(
+  cd "$GB2"
+  GBROOT="$GB2" GBVPID=1 GBGATE=1 QEMU_STRACE=1 \
+    timeout 60 qemu-arm-static ./init \
+    > "$OUT/init-stdout.txt" 2> "$OUT/init-strace.txt"
+  echo $? > "$OUT/init-rc.txt"
+)
+INIT_RC=$(cat init-rc.txt)
+{
+  ok2=1
+  echo "== guest init window =="
+  echo "init exit code after 60s window: $INIT_RC (124 = still alive, killed by timeout)"
+  [ "$INIT_RC" = "124" ] || ok2=0
+  echo "== guest boot log (dev/console) =="
+  if grep -q "reading config file" "$GB2/dev/console"; then
+    echo "YES  console contains init's 'reading config file'"
+  else
+    echo "NO   console lacks init's boot log line"
+    ok2=0
+  fi
+  echo "== seccomp shield: blocked syscalls issued by the guest =="
+  BLOCKED_RE='(^|[^a-zA-Z0-9_])(mount|umount|umount2|reboot|mknod|chmod|chown32|lchown32|chown|lchown|rmdir|symlink|link|accept|ftruncate|settimeofday|sethostname|setdomainname|setuid32|setgid32|setreuid32|setregid32|setresgid32|setgroups32|setuid|setgid|setgroups|pause|sigsuspend|sigprocmask|sigpending|ioprio_set|ioprio_get)\('
+  if grep -E "$BLOCKED_RE" init-strace.txt > init-blocked.txt; then
+    echo "NO   blocked syscalls were issued (first 10):"
+    head -10 init-blocked.txt
+    ok2=0
+  else
+    echo "YES  no blocked syscall issued in the window"
+  fi
+  echo "== shield rewrites observed (informational) =="
+  echo "fchmodat calls: $(grep -cE 'fchmodat\(' init-strace.txt)"
+  echo "fchownat calls: $(grep -cE 'fchownat\(' init-strace.txt)"
+  echo "rt_sigsuspend calls: $(grep -cE 'rt_sigsuspend\(' init-strace.txt)"
+  echo
+  echo "init checks ok=$ok2 init_rc=$INIT_RC"
+} > init-host-checks.txt 2>&1
+cat init-host-checks.txt
+
 # The job fails when the probe's core checks failed or the host-side
 # file evidence is missing.
 if [ $SMOKE_RC -ne 0 ]; then
@@ -77,6 +133,10 @@ if [ $SMOKE_RC -ne 0 ]; then
 fi
 grep -q "host checks ok=1" smoke-host-checks.txt || {
   echo "SMOKE FAILED: host-side evidence missing"
+  exit 1
+}
+grep -q "init checks ok=1" init-host-checks.txt || {
+  echo "SMOKE FAILED: guest init liveness/seccomp checks"
   exit 1
 }
 echo "SMOKE OK"

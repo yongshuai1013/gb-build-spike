@@ -107,6 +107,70 @@ checkout 回原版（並刪去新增檔），再依檔名序 `git apply`。目�
 由宿主核心解析、屬已知缺口；exec scratch 緩衝全行程共用一份，
 並發 execve 有競態（成功即換像、影響僅失敗路徑）。
 
+### 0004-gb-gate-seccomp-shield.patch — 宿主 seccomp 盾（只改 gb_gate.c）
+
+M1 真機首跑判讀（2026-11-10，moto g51）：init 啟動 3ms 即死、
+rc=159、客體零輸出。rc 經 GateService 的 `Process.waitFor()` 取得，
+Java 慣例 128+signal → **signal 31 = SIGSYS**。qemu-user 以與真機
+逐字節相同的 init 重現其序幕 syscall 序列（umask→mkdir×3→
+**mount("tmpfs","/dev")**→…），對照現代 bionic 的 app seccomp
+政策生成輸入（SYSCALLS.TXT − BLOCKLIST ＋ ALLOWLIST，以 bionic
+自家 genseccomp 解析器按 arm 號碼核實）：mount 明列 BLOCKLIST。
+設計文件原假設「mount 不攔截、回真實 EPERM」不成立——過濾器在
+syscall 入口處決，EPERM 永遠到不了。twoyi 客體解法同理：被禁呼叫
+在 libc 語義層根本不發出。本補丁把原則落到分發器：**封鎖清單上的
+呼叫在 gate 內一律本地處置，永不 fall-through**。處置分三類
+（皆在 `__gb_gate_pre`，gate 關閉時全數不執行，emulator 基線不變）：
+
+- **假辦回 0**：mount、umount2、reboot、settimeofday、sethostname、
+  setdomainname、setuid32／setgid32／setreuid32／setregid32／
+  setresgid32／setgroups32、ioprio_set／get。理由：掛載點與憑證在
+  客體模型本是虛構（路徑翻譯＋getuid 回 0）；reboot 必須攔——
+  critical 服務連環崩潰時 init 會呼叫 android_reboot，裸發同樣
+  SIGSYS 且這次死的是 init 本人；假辦後 init 續行（客體永不真
+  重啟宿主）。setresuid32 在白名單內，不動。
+- **改寫為白名單等價形**（pre 改參數＋把新號寫入幀的 nr 槽
+  `args[11]`，樁 svc 前會以該槽重載 r7；syscall() 入口幀布局相同）：
+  chmod(15)→fchmodat(333)、chown32(212)／lchown32(198)→
+  fchownat(325，lchown 加 AT_SYMLINK_NOFOLLOW)、rmdir(40)→
+  unlinkat(328)＋AT_REMOVEDIR、symlink(83)→symlinkat(331)、
+  accept(285)→accept4(366)＋flags=0、ftruncate(93)→
+  ftruncate64(194)（長度改 (pad,lo,hi) 布局）、
+  sigprocmask(126)→rt_sigprocmask(175)＋sigsetsize=8、
+  sigpending(73)→rt_sigpending(173)＋size=8。路徑參數沿用既有
+  翻譯（chown 家族的表項因生成標頭只有 *32 名而從未生效，改在
+  本補丁的改寫段內自行翻譯——順帶修好）。
+- **模擬**：mknod(14)——以 raw open(O_CREAT|O_EXCL) 在譯後路徑建
+  一般檔案（客體裝置節點在本設計即一般檔案，如骨架的
+  /dev/console），已存在回 -EEXIST，其餘失敗照原 errno 回；
+  open_devnull_stdio 的 `mknod==0 才 open` 語義由此成立。
+  pause(29)／sigsuspend(72)——以 raw rt_sigsuspend(179) 等待
+  （pause 用當前 mask、先以 rt_sigprocmask 讀回；sigsuspend 用
+  寄存器傳入的 mask 值），回 -EINTR。binder WRITE_READ 的停泊
+  迴圈原以 **raw svc 直發 pause**——繞得過樁、繞不過過濾器，
+  servicemanager 首次停泊即會 SIGSYS——同步改為 raw
+  rt_sigsuspend 空 mask 迴圈。
+- **裝置重定向補項**：open("/dev/__kmsg__") 改落 `$GBROOT/dev/
+  console`——log_init 開它寫開機日誌、隨即 unlink 本名，改落
+  console 檔後日誌對宿主可見（unlink 仍按原名翻譯、刪的是
+  mknod 模擬建的空檔，不誤傷 console）。
+
+差集全表（客體 libc 可發出的號 ∩ 政策拒絕 ∩ M1 生命週期路徑）
+以 init 源码＋init.rc 觸發序核實：序幕 mount 為第一槍；其後依序
+是 open_devnull 的 mknod、on-init 首令 sysclktz 的 settimeofday、
+on-init 的 symlink／mount／chown／chmod、property_init 的
+ftruncate、property_service 的 accept、service_start 子行程的
+setgid／setgroups／setuid（servicemanager 帶 user system，
+是首批服務判據）、vold／media 的 ioprio_set。不在 M1 路徑的
+同類項（link、utimes、acct、syslog、init_module 等）未動，
+留待後續里程碑按需再加。
+
+驗證：分發器新邏輯以 ARM 交叉編譯＋qemu-user 單元 harness 逐項
+驗畢（18 項：假辦／改寫後參數與 nr 槽／mknod 建檔與 EEXIST／
+__kmsg__ 重定向／pause 被信號喚醒回 -EINTR）；CI 另在
+qemu-smoke.sh phase 2 以真 init 跑 60 秒窗口斷言：程序仍存活、
+dev/console 含開機日誌、strace 中無任何被禁 syscall 被發出。
+
 ## system-core
 
 ### 0001-ueventd-no-uevent-idle.patch

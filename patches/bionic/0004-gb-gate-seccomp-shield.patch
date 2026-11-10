@@ -1,0 +1,280 @@
+diff --git a/libc/arch-arm/bionic/gb_gate.c b/libc/arch-arm/bionic/gb_gate.c
+--- a/libc/arch-arm/bionic/gb_gate.c
++++ b/libc/arch-arm/bionic/gb_gate.c
+@@ -26,6 +26,15 @@
+  *     trampoline /system/bin/gbexec (the stock GB linker cannot be
+  *     invoked with a program argument; see probes/gbexec.c) and makes
+  *     sure the child environment carries GBVPID and LD_LIBRARY_PATH.
++ *   - host seccomp shield: guest processes inherit the host app's
++ *     seccomp filter, which kills a denied syscall with SIGSYS before
++ *     the kernel can return an error, so no syscall on the modern app
++ *     blocklist (or dropped from modern bionic's syscall table) may
++ *     ever be issued raw. __gb_gate_pre() fakes them (mount, set*id,
++ *     settimeofday, ...), rewrites them to allowlisted equivalents
++ *     (chmod->fchmodat, accept->accept4, ...), or emulates them with
++ *     raw allowlisted syscalls (mknod creates a plain file, pause and
++ *     sigsuspend wait on rt_sigsuspend). See patches/README.md.
+  *
+  * This file is compiled in ARM mode (the .arm suffix) and must never
+  * call a libc function that itself performs a syscall through a stub
+@@ -43,6 +52,33 @@
+ #define __NR_kill 37
+ #endif
+ 
++/* Syscalls this tree never stubs (no SYSCALLS.TXT entry, hence no
++ * define in <sys/linux-syscalls.h>) that the dispatcher still has to
++ * recognise. Numbers are the stable ARM EABI assignments. */
++#ifndef __NR_sethostname
++#define __NR_sethostname 74
++#endif
++#ifndef __NR_setdomainname
++#define __NR_setdomainname 121
++#endif
++#ifndef __NR_rt_sigpending
++#define __NR_rt_sigpending 173
++#endif
++#ifndef __NR_ftruncate64
++#define __NR_ftruncate64 194
++#endif
++#ifndef __NR_symlinkat
++#define __NR_symlinkat 331
++#endif
++#ifndef __NR_accept4
++#define __NR_accept4 366
++#endif
++
++/* fcntl.h constants the rewrites below need (not included here). */
++#define GB_AT_FDCWD            (-100)
++#define GB_AT_SYMLINK_NOFOLLOW 0x100
++#define GB_AT_REMOVEDIR        512
++
+ extern char **environ;
+ 
+ /* Minimal ELF32 views (avoid depending on the tree's <elf.h> include
+@@ -149,6 +185,34 @@
+     return gb_raw6(__NR_getpid, 0, 0, 0, 0, 0, 0);
+ }
+ 
++static long gb_raw_sigsuspend(const unsigned long *mask)
++{
++    /* rt_sigsuspend(mask, sigsetsize); the kernel sigset is 8 bytes. */
++    return gb_raw6(__NR_rt_sigsuspend, (long) mask, 8, 0, 0, 0, 0);
++}
++
++/* pause()/sigsuspend() emulation: the legacy numbers (29/72) are not
++ * in the host app seccomp allowlist, rt_sigsuspend is. With mask==0
++ * the caller's current mask is used (pause semantics); otherwise the
++ * given 64-bit mask applies (sigsuspend semantics: the mask value the
++ * legacy call passes in a register occupies the low word). Returns
++ * -EINTR, the only way either call ever returns. */
++static long gb_wait_signal(const unsigned long *mask)
++{
++    unsigned long m[2];
++    if (mask) {
++        m[0] = mask[0];
++        m[1] = mask[1];
++    } else {
++        m[0] = 0;
++        m[1] = 0;
++        gb_raw6(__NR_rt_sigprocmask, 0 /* how ignored, set==NULL */,
++                0, (long) m, 8, 0, 0);
++    }
++    gb_raw_sigsuspend(m);
++    return -EINTR;
++}
++
+ /* ---- tiny string helpers (no libc calls) ---- */
+ 
+ static int gb_strlen(const char *s)
+@@ -652,12 +716,103 @@
+ #endif
+     if (nr == __NR_execve) return gb_pre_execve(args, skip_result);
+ 
++    /* ---- host seccomp shield ----
++     * The host app's seccomp filter answers a denied syscall with
++     * SIGSYS at the entry point, before any kernel permission check
++     * could produce EPERM (this is what killed the M1 guest init 3ms
++     * into its first run: its first mount() was issued raw). Nothing
++     * on the modern app blocklist - and nothing modern bionic dropped
++     * from its syscall table, which is denied by default - may fall
++     * through to the raw svc. Fakes return success: mounts and id
++     * changes are fiction in the guest model anyway (paths are
++     * translated into the rootfs, getuid() reports 0). Rewrites
++     * retarget the svc by storing the new number in args[11], the
++     * frame slot every stub reloads r7 from after pre(). reboot is
++     * faked for the same reason: init calls android_reboot() when a
++     * critical service crash-loops, and a guest must neither reboot
++     * the host nor die asking for it. */
++    switch (nr) {
++    case __NR_mount:
++#ifdef __NR_umount
++    case __NR_umount:
++#endif
++    case __NR_umount2:
++    case __NR_reboot:
++    case __NR_settimeofday:
++    case __NR_sethostname:
++    case __NR_setdomainname:
++    case __NR_setuid32:
++    case __NR_setgid32:
++    case __NR_setreuid32:
++    case __NR_setregid32:
++    case __NR_setresgid32:
++    case __NR_setgroups32:
++#ifdef __NR_ioprio_set
++    case __NR_ioprio_set:
++    case __NR_ioprio_get:
++#endif
++        *skip_result = 0;
++        __gb_gate_handled++;
++        return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++    case __NR_pause:
++        *skip_result = gb_wait_signal(0);
++        __gb_gate_handled++;
++        return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++    case __NR_sigsuspend: {
++        unsigned long m[2];
++        m[0] = (unsigned long) args[2];
++        m[1] = 0;
++        *skip_result = gb_wait_signal(m);
++        __gb_gate_handled++;
++        return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++    }
++    case __NR_sigprocmask:
++        /* Legacy 3-arg form; the rt form appends sigsetsize. Bionic
++         * sigset_t is 64-bit, matching the kernel's 8-byte set. */
++        args[3] = 8;
++        args[11] = __NR_rt_sigprocmask;
++        return 0;
++    case __NR_sigpending:
++        args[1] = 8;
++        args[11] = __NR_rt_sigpending;
++        return 0;
++    case __NR_accept:
++        args[3] = 0; /* accept4 flags: none == accept() */
++        args[11] = __NR_accept4;
++        return 0;
++    case __NR_ftruncate:
++        /* ftruncate64 takes the length as (pad, lo, hi) after fd. */
++        args[3] = 0;
++        args[2] = args[1];
++        args[1] = 0;
++        args[11] = __NR_ftruncate64;
++        return 0;
++    }
++
+     if (nr == __NR_open) {
+         const char *p = (const char *) args[0];
+         if (p && gb_strcmp(p, "/dev/binder") == 0) {
+             gb_pre_binder_open(skip_result);
+             return GB_ACT_SKIP_SVC;
+         }
++        if (p && gb_strcmp(p, "/dev/__kmsg__") == 0) {
++            /* init's kernel-log fd: land it on the console file so
++             * the guest boot log stays visible to the host (the node
++             * itself is unlinked right after the open, only this
++             * redirect is). */
++            {
++                char *slot = gb_path_slot();
++                const char *suffix = "/dev/console";
++                int j = 0, k = 0;
++                while (gb_root[j]) { slot[k++] = gb_root[j++]; }
++                j = 0;
++                while (suffix[j]) { slot[k++] = suffix[j++]; }
++                slot[k] = 0;
++                args[0] = (long) slot;
++            }
++            __gb_gate_handled++;
++            return 0;
++        }
+         if (gb_translate_arg(args, 0) != 0) {
+             *skip_result = -ENAMETOOLONG;
+             __gb_gate_handled++;
+@@ -691,8 +846,12 @@
+             if (req == GB_BINDER_WRITE_READ) {
+                 /* Park the caller like a thread blocked in the binder
+                  * driver: the process stays alive (servicemanager in
+-                 * its binder_loop) but no transfer is implemented. */
+-                for (;;) gb_raw6(__NR_pause, 0, 0, 0, 0, 0, 0);
++                 * its binder_loop) but no transfer is implemented.
++                 * The wait uses raw rt_sigsuspend, never pause: the
++                 * legacy pause number is not in the host app seccomp
++                 * allowlist and a raw svc would draw SIGSYS. */
++                static const unsigned long gb_no_mask[2] = { 0, 0 };
++                for (;;) gb_raw_sigsuspend(gb_no_mask);
+             }
+             /* SET_MAX_THREADS, SET_CONTEXT_MGR and anything else on
+              * the dummy fd: succeed silently. */
+@@ -758,9 +917,71 @@
+             if (gb_pathargs[i].idx1 >= 0 &&
+                 gb_translate_arg(args, gb_pathargs[i].idx1) != 0)
+                 goto toolong;
+-            return 0;
++            break;
+         }
+     }
++
++    /* ---- seccomp rewrites for legacy path syscalls ----
++     * The path argument has been translated above (or is translated
++     * here for chown32/lchown32, which the table cannot name: this
++     * tree's generated headers only define the *32 numbers). Each
++     * rewrite reshuffles the arguments into the allowlisted *at form
++     * and retargets the svc through the frame's nr slot (args[11]). */
++    if (nr == __NR_chmod) {
++        args[2] = args[1];
++        args[1] = args[0];
++        args[0] = GB_AT_FDCWD;
++        args[11] = __NR_fchmodat;
++        __gb_gate_handled++;
++        return 0;
++    }
++    if (nr == __NR_rmdir) {
++        args[2] = GB_AT_REMOVEDIR;
++        args[1] = args[0];
++        args[0] = GB_AT_FDCWD;
++        args[11] = __NR_unlinkat;
++        __gb_gate_handled++;
++        return 0;
++    }
++    if (nr == __NR_symlink) {
++        /* (target, linkpath) -> symlinkat(target, AT_FDCWD, linkpath);
++         * the table translated args[1] (the link path) only. */
++        args[2] = args[1];
++        args[1] = GB_AT_FDCWD;
++        args[11] = __NR_symlinkat;
++        __gb_gate_handled++;
++        return 0;
++    }
++#ifdef __NR_chown32
++    if (nr == __NR_chown32 || nr == __NR_lchown32) {
++        long flags = (nr == __NR_lchown32) ? GB_AT_SYMLINK_NOFOLLOW : 0;
++        if (gb_translate_arg(args, 0) != 0) goto toolong;
++        args[4] = flags;
++        args[3] = args[2];
++        args[2] = args[1];
++        args[1] = args[0];
++        args[0] = GB_AT_FDCWD;
++        args[11] = __NR_fchownat;
++        __gb_gate_handled++;
++        return 0;
++    }
++#endif
++#ifdef __NR_mknod
++    if (nr == __NR_mknod) {
++        /* Emulated with a plain file: device nodes are regular files
++         * in this design (cf. /dev/console in the rootfs skeleton),
++         * and the raw number is not in the host app allowlist.
++         * O_CREAT|O_EXCL (access mode 0) gives the faithful EEXIST for a
++         * node that already exists; any other failure is reported
++         * with the errno the creation produced. */
++        long fd = gb_raw_open((const char *) args[0],
++                              0100 | 0200, args[1] & 07777);
++        if (fd >= 0) gb_raw_close(fd);
++        *skip_result = (fd >= 0) ? 0 : fd;
++        __gb_gate_handled++;
++        return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++    }
++#endif
+     return 0;
+ 
+ toolong:

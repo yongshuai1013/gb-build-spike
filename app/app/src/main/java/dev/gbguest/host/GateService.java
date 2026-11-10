@@ -113,14 +113,29 @@ public class GateService extends Service {
                 try { rc = initProcess.waitFor(); }
                 catch (InterruptedException ignored) {}
                 writeStatus(getApplicationContext(),
-                        "init exited rc=" + rc);
+                        "init exited rc=" + rc + decodeRc(rc));
                 HostLog.log(getApplicationContext(),
-                        "guest init exited rc=" + rc);
+                        "guest init exited rc=" + rc + decodeRc(rc));
             }, "gb-monitor");
             monitorThread.start();
         } catch (Exception e) {
             writeStatus(ctx, "ERROR: " + e);
             HostLog.log(ctx, "guest start failed: " + e);
+        }
+    }
+
+    /** Process.waitFor() reports a process killed by signal N as
+     * 128+N. Decode the cases this line cares about so the log is
+     * self-explanatory (159 = SIGSYS: the host seccomp filter denied
+     * a guest syscall - the M1 first-run failure mode). */
+    private static String decodeRc(int rc) {
+        if (rc <= 128) return "";
+        switch (rc - 128) {
+            case 6:  return " (killed by SIGABRT)";
+            case 9:  return " (killed by SIGKILL)";
+            case 11: return " (killed by SIGSEGV)";
+            case 31: return " (killed by SIGSYS: host seccomp denied a syscall)";
+            default: return " (killed by signal " + (rc - 128) + ")";
         }
     }
 

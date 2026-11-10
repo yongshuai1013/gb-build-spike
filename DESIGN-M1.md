@@ -52,9 +52,14 @@ App 內可見日誌、可匯出整包。不以 boot_completed 為 M1 線。
   `LD_LIBRARY_PATH=$GBROOT/system/lib:$GBROOT/vendor/lib`。
   init 本人是靜態連結，不受影響；此包裝位於呼叫方 libc（含 init 的
   靜態 libc），故 init 拉起所有動態服務都走此路。
-- **mount 等無權操作**：不攔截，回真實 EPERM——GB init 對 mount
-  失敗僅記錄續行（以源码為準，WS-A 核實）；若某處失敗是致命的，
-  改 init 源码跳過並逐項記錄，不在 compat 層偽造成功。
+- **mount 等無權操作**：~~不攔截，回真實 EPERM~~——**此假設已被
+  真機證偽（2026-11-10 M1 首跑）**：客體行程繼承宿主 App 的 seccomp
+  過濾器，被禁 syscall 在入口即遭 SIGSYS 處決（rc=159=128+31），
+  根本到不了內核的 EPERM 路徑；init 在 main 的第一個 mount 當場
+  死亡（3ms、零輸出）。正解（twoyi 客體同路）：凡落在宿主 App 封鎖
+  清單（或已被現代 bionic 移出 syscall 表、預設拒絕）的呼叫，一律
+  在 compat 層假辦／改寫／模擬，永不裸發——見 bionic 補丁 0004
+  （seccomp shield）。
 
 ## 客體源码補丁（system/core 等，與 bionic 補丁分開列帳）
 
