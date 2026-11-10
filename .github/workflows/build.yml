@@ -1,0 +1,53 @@
+name: gb-full-tree-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    steps:
+      - name: Check out spike repo
+        uses: actions/checkout@v4
+
+      - name: Install repo tool (host)
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Cache AOSP tree
+        uses: actions/cache@v4
+        with:
+          path: aosp
+          key: aosp-android-2.3.7_r1-v1
+
+      - name: Sync AOSP android-2.3.7_r1
+        run: bash scripts/sync-tree.sh
+
+      - name: Build full tree in era container (Ubuntu 10.04)
+        run: bash scripts/build-tree.sh
+
+      - name: Collect report
+        if: always()
+        run: bash scripts/collect-report.sh
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-build-report
+          path: report/
+          if-no-files-found: warn
+
+      - name: Upload system.img (if produced)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-system-img
+          path: aosp/out/target/product/generic/system.img
+          if-no-files-found: ignore
