@@ -114,8 +114,10 @@ jobs:
           ls -l "$APK"
           BT="$ANDROID_HOME/build-tools/34.0.0"
           "$BT/apksigner" verify --verbose --print-certs "$APK" | tee /tmp/certs.txt
-          # Project long-term key, SHA-256 (see README M1-B section).
-          grep -qi '49:91:7D:B4:A0:DE:56:DD:20:A5:2B:DC:6C:4C:D5:57:B3:A0:D4:2D:CE:20:A5:43:00:38:E7:35:09:B5:05:A0' /tmp/certs.txt
+          # Project long-term key SHA-256 fingerprint
+          # 49:91:7D:B4:...:B5:05:A0 (see README M1-B section);
+          # apksigner prints it as colon-less lowercase hex.
+          grep -q '49917db4a0de56dd20a52bdc6c4cd557b3a0d42dce20a5430038e73509b505a0' /tmp/certs.txt
           echo "signature fingerprint OK"
           "$BT/aapt" dump badging "$APK" | tee /tmp/badging.txt
           grep -q "package: name='dev.gbguest.host'" /tmp/badging.txt
