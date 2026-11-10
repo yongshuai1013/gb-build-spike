@@ -43,8 +43,11 @@ install_group \
 G1_RC=$?
 
 # Group 2 (mandatory): 32-bit runtime libraries for the prebuilt
-# toolchains (libc6-i386 ships /lib/ld-linux.so.2).
-install_group lib32z1 lib32ncurses5 lib32stdc++6 libc6-i386
+# toolchains (libc6-i386 ships /lib/ld-linux.so.2), plus the 32-bit
+# development headers: Gingerbread compiles its host tools with -m32,
+# and libc6-dev-i386 ships the /usr/include/i386-linux-gnu/bits/*.h
+# they need (first failure without it: bits/predefs.h).
+install_group lib32z1 lib32ncurses5 lib32stdc++6 libc6-i386 libc6-dev-i386
 G2_RC=$?
 
 # Group 3 (best-effort): 32-bit development packages and multilib,
