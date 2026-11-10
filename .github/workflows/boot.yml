@@ -1,0 +1,65 @@
+name: gb-boot-baseline
+
+# Boot baseline probe: does the UNMODIFIED self-built Gingerbread system
+# (probe 1 output) actually boot? Era emulator (SDK r12) + the tree's own
+# prebuilt goldfish kernel + the images this same job just built.
+# Manual dispatch only, so pushes never queue a boot run by accident.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  boot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    steps:
+      - name: Check out spike repo
+        uses: actions/checkout@v4
+
+      - name: Install repo tool (host)
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Restore cached AOSP tree
+        uses: actions/cache/restore@v4
+        with:
+          path: aosp
+          key: aosp-android-2.3.7_r1-v2-shallow
+
+      - name: Sync AOSP android-2.3.7_r1
+        run: bash scripts/sync-tree.sh
+
+      - name: Download era SDK emulator (r12, fallbacks r11/r10)
+        run: |
+          mkdir -p sdk
+          ok=""
+          for v in r12 r11 r10; do
+            url="https://dl.google.com/android/android-sdk_${v}-linux_x86.tgz"
+            echo "trying $url"
+            if curl -sL --fail "$url" -o /tmp/sdk.tgz; then
+              echo "android-sdk_${v}-linux_x86" > sdk/VERSION.txt
+              ok="$v"
+              break
+            fi
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: no era SDK could be downloaded"
+            exit 1
+          fi
+          tar -xzf /tmp/sdk.tgz -C sdk
+          ls -la sdk/android-sdk-linux_x86/tools/emulator
+          file sdk/android-sdk-linux_x86/tools/emulator || true
+
+      - name: Build tree and boot it in era container (Ubuntu 12.04)
+        run: bash scripts/boot-tree.sh
+
+      - name: Upload boot report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-boot-report
+          path: boot-report/
+          if-no-files-found: warn
