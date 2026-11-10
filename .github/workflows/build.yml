@@ -20,17 +20,23 @@ jobs:
           chmod +x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Cache AOSP tree
-        uses: actions/cache@v4
+      - name: Restore cached AOSP tree
+        uses: actions/cache/restore@v4
         with:
           path: aosp
           key: aosp-android-2.3.7_r1-v2-shallow
-          save-always: true
 
       - name: Sync AOSP android-2.3.7_r1
         run: bash scripts/sync-tree.sh
 
-      - name: Build full tree in era container (Ubuntu 10.04)
+      - name: Save AOSP tree to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: aosp
+          key: aosp-android-2.3.7_r1-v2-shallow
+
+      - name: Build full tree in era container (Ubuntu 12.04)
         run: bash scripts/build-tree.sh
 
       - name: Collect report

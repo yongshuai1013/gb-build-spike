@@ -7,6 +7,11 @@
 # manifest v2 schema 1, which modern Docker refuses to pull. 12.04 is
 # schema 2 and is itself an era-documented GB build environment
 # (GNU make 3.81, OpenJDK 6, gcc 4.6).
+#
+# Installs run in groups: precise's early multiarch support makes some
+# :i386 -dev packages conflict with their amd64 counterparts. The core
+# toolchain and the 32-bit *runtime* libs (all the prebuilt binaries
+# actually need) are mandatory; the :i386 -dev set is best-effort.
 set -x
 
 # Precise is EOL: its packages live on old-releases.ubuntu.com now.
@@ -16,13 +21,41 @@ sed -i -e 's|archive.ubuntu.com|old-releases.ubuntu.com|g' \
 
 dpkg --add-architecture i386 2>/dev/null || true
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
+
+{
+  echo "== apt candidates =="
+  apt-cache policy gcc-4.6 g++-4.6 libc6-dev linux-libc-dev \
+    zlib1g-dev openjdk-6-jdk 2>/dev/null | grep -A1 '^[a-z]'
+} > /report/apt-policy.txt 2>&1
+
+install_group() {
+  echo "=== apt group: $* ==="
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+  echo "=== group rc=$? ==="
+}
+
+# Group 1 (mandatory): host toolchain and build utilities, amd64 only.
+install_group \
   git-core gnupg flex bison gperf build-essential zip curl unzip file \
-  libc6-dev libncurses5-dev:i386 x11proto-core-dev libx11-dev:i386 \
-  libreadline6-dev:i386 libgl1-mesa-glx:i386 libgl1-mesa-dev \
-  g++-multilib zlib1g-dev:i386 zlib1g-dev \
+  libc6-dev zlib1g-dev \
   libxml2-utils xsltproc tofrodos python-markdown perl python bc patch \
   openjdk-6-jdk
+G1_RC=$?
+
+# Group 2 (mandatory): 32-bit runtime libraries for the prebuilt
+# toolchains (libc6-i386 ships /lib/ld-linux.so.2).
+install_group lib32z1 lib32ncurses5 lib32stdc++6 libc6-i386
+G2_RC=$?
+
+# Group 3 (best-effort): 32-bit development packages and multilib,
+# historically listed for emulator/OpenGL host pieces. The generic
+# product may not need them; failure here must not block the build.
+install_group \
+  libncurses5-dev:i386 libx11-dev:i386 libreadline6-dev:i386 \
+  zlib1g-dev:i386 libgl1-mesa-glx:i386 libgl1-mesa-dev \
+  x11proto-core-dev g++-multilib
+G3_RC=$?
+echo "apt groups: g1=$G1_RC g2=$G2_RC g3=$G3_RC" > /report/apt-groups.txt
 
 # Era quirk from the official 12.04 instructions: some host tools link
 # -lGL and only the versioned i386 libGL is present.
@@ -42,6 +75,11 @@ ln -sf /usr/lib/i386-linux-gnu/mesa/libGL.so.1 \
     || echo "no 32-bit loader found"
 } > /report/environment.txt 2>&1
 cat /report/environment.txt
+
+if [ $G1_RC -ne 0 ] || [ $G2_RC -ne 0 ]; then
+  echo "mandatory apt group failed (g1=$G1_RC g2=$G2_RC)" > /report/FAILED.txt
+  exit 1
+fi
 
 # Build as a non-root user whose uid/gid match the host checkout owner.
 groupadd -g "${HOST_GID:-1001}" builder 2>/dev/null || true

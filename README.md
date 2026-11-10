@@ -13,10 +13,14 @@ arm-eabi-4.4.3 工具鏈 SHA-256 `fe166ff8…`）；本探針驗的是整棵樹�
 - **拉樹在 runner 上**：`repo init -u https://android.googlesource.com/platform/manifest -b android-2.3.7_r1`，
   `repo sync -c`；已 sync 的樹以 `actions/cache` 緩存（key 含 branch），
   環境迭代不重拉全樹。
-- **編譯在年代容器內**：Docker `ubuntu:10.04`（lucid）——GB 官方文檔的
-  年代環境：gcc 4.4.3、GNU make 3.81、OpenJDK 6、Python 2.6，
-  主機 32 位運行庫供 prebuilt 工具鏈（32 位二進位）使用。
-  lucid 已 EOL，apt 源改指 `old-releases.ubuntu.com`。
+- **編譯在年代容器內**：Docker `ubuntu:12.04`（precise）——GB 年代文檔
+  認可的環境：gcc 4.6、GNU make 3.81、OpenJDK 6、Python 2.7，
+  32 位運行庫供 prebuilt 工具鏈（32 位二進位）使用。
+  precise 已 EOL，apt 源改指 `old-releases.ubuntu.com`。
+  （首選原本是 10.04，但 Docker Hub 的 `ubuntu:10.04` 映像仍是 manifest
+  v2 schema 1、現代 Docker 拒收；12.04 是 schema 2 可拉。另注意 precise
+  早期 multiarch 的 `:i386` -dev 套件會與 amd64 版衝突，容器腳本因此
+  分組安裝：核心工具鏈＋32 位運行庫必裝，`:i386` -dev 組選裝。）
 - 容器內以 root 裝環境，再降權到與 runner 相同 uid 的 `builder` 用戶編譯，
   保證緩存的樹在後續 run 仍可寫。
 - 產品：`lunch generic-eng`（樹不提供時退 `full-eng`，實際用哪個記在報告裡），
