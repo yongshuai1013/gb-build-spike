@@ -1,11 +1,11 @@
-diff --git a/libc/arch-arm/bionic/gb_gate.c.arm b/libc/arch-arm/bionic/gb_gate.c.arm
+diff --git a/libc/arch-arm/bionic/gb_gate.c b/libc/arch-arm/bionic/gb_gate.c
 new file mode 100644
-index 0000000..ba98c5b
+index 0000000..35e5cb2
 --- /dev/null
-+++ b/libc/arch-arm/bionic/gb_gate.c.arm
++++ b/libc/arch-arm/bionic/gb_gate.c
 @@ -0,0 +1,821 @@
 +/*
-+ * gb_gate.c.arm - Gingerbread guest compat dispatcher (M1, workline A).
++ * gb_gate.c - Gingerbread guest compat dispatcher (M1, workline A).
 + *
 + * Every generated ARM EABI syscall stub in this libc passes through
 + * __gb_gate_pre()/__gb_gate_post() (see libc/tools/gensyscalls.py and

@@ -9,7 +9,7 @@ checkout 回原版（並刪去新增檔），再依檔名序 `git apply`。目�
 
 | 檔案 | 改動 | 理由／行為差異 |
 |---|---|---|
-| `libc/Android.mk` | ARM `libc_common_src_files` 加 `arch-arm/bionic/gb_gate.c.arm` | compat 分發器進靜態與動態 libc 本體。GBROOT 未設時行為不變（見下）。 |
+| `libc/Android.mk` | ARM `libc_common_src_files` 加 `arch-arm/bionic/gb_gate.c.arm`（源文件為 `gb_gate.c`） | compat 分發器進靜態與動態 libc 本體。GBROOT 未設時行為不變（見下）。 |
 | `libc/tools/gensyscalls.py` | EABI 兩模板（default／long）換成 gate 版 | 模板是已入樹樁的生成源頭；改法與 0002 的產出逐字一致（僅檔頭註解差一行），日後重跑 gensyscalls 不會把 gate 洗掉。 |
 | `libc/arch-arm/bionic/syscall.S` | EABI 分支加 gate 路徑 | `syscall(2)` 是繞過具名樁的通用入口（libcutils 的 ioprio_set 等走它），一併納管；`mode==2` 時走標籤 10 的原指令序列逐字版。非 EABI 分支不動。 |
 | `libc/arch-arm/bionic/kill.S` | 函數頭加 6 行 gate 檢查 | kill 是手寫樁、無生成版；gate 開時先呼叫 `__gb_gate_fix_pid()` 把虛擬 pid 參數翻回真 pid（只動 r0，其餘原樣）。 |
@@ -42,8 +42,10 @@ checkout 回原版（並刪去新增檔），再依檔名序 `git apply`。目�
 
 ### 0003-gb-gate-dispatcher.patch — compat 分發器本體（新增檔）
 
-新增 `libc/arch-arm/bionic/gb_gate.c.arm`（ARM 模式編譯；`.arm` 後綴
-是 bionic 既有慣例）。內容與處置表（對照 DESIGN-M1.md）：
+新增 `libc/arch-arm/bionic/gb_gate.c`（Android.mk 以 `gb_gate.c.arm`
+列入——`.arm` 是構建系統的 ARM 模式後綴、會被剝掉找源文件，磁碟
+檔名不帶後綴；首跑 CI 即因檔名帶後綴而 No rule to make target，
+已更正）。內容與處置表（對照 DESIGN-M1.md）：
 
 - **總開關**：`__gb_gate_mode`（0 未決／1 開／2 關）。首次樁呼叫時以
   `environ` 解析 GBROOT：未設定→定案 2（其後樁走原版序列）；解析

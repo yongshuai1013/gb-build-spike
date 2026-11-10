@@ -11,7 +11,7 @@ PATCHES="$PWD/patches"
 # Reset to stock first: re-running this script (or re-running the
 # workflow on a warm cache) must reproduce the same patched tree.
 git -C "$AOSP/bionic" checkout -- .
-git -C "$AOSP/bionic" clean -f -- libc/arch-arm/bionic/gb_gate.c.arm
+git -C "$AOSP/bionic" clean -f -- libc/arch-arm/bionic/gb_gate.c
 git -C "$AOSP/system/core" checkout -- .
 
 for p in "$PATCHES"/bionic/*.patch; do
@@ -27,8 +27,8 @@ cp probes/*.c probes/Android.mk "$AOSP/external/gate_probes/"
 
 # Spot-check the markers the rest of the pipeline relies on.
 grep -q "__gb_gate_pre" "$AOSP/bionic/libc/arch-arm/syscalls/write.S"
-grep -q "gb_gate.c.arm" "$AOSP/bionic/libc/Android.mk"
-test -f "$AOSP/bionic/libc/arch-arm/bionic/gb_gate.c.arm"
+grep -q "gb_gate.c" "$AOSP/bionic/libc/Android.mk"
+test -f "$AOSP/bionic/libc/arch-arm/bionic/gb_gate.c"
 grep -q "no uevent socket" "$AOSP/system/core/init/ueventd.c"
 test -f "$AOSP/external/gate_probes/gbexec.c"
 

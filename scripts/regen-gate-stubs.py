@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate the ARM EABI syscall stubs of a GB 2.3.7 bionic tree so
 that every stub passes through the M1 compat dispatcher
-(__gb_gate_pre/__gb_gate_post in libc/arch-arm/bionic/gb_gate.c.arm).
+(__gb_gate_pre/__gb_gate_post in libc/arch-arm/bionic/gb_gate.c).
 
 The checked-in stubs under libc/arch-arm/syscalls/ are what the build
 actually compiles (gensyscalls.py is only the developer tool that

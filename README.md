@@ -240,7 +240,7 @@ heartbeat，`GBROOT_ONCE=1` 時跑一拍即退）＋最小骨架，讓殼的
 ### compat 摘要
 
 改造後 bionic 的每個 ARM EABI syscall 樁先進 compat 分發器
-`__gb_gate()`（`libc/arch-arm/bionic/gb_gate.c.arm`）。`GBROOT`
+`__gb_gate()`（`libc/arch-arm/bionic/gb_gate.c`）。`GBROOT`
 未設定時分發器定案「關」，樁走原版指令序列逐字版（透明）；
 設定時：絕對路徑加 `$GBROOT` 前綴（`/proc`、`/sys` 與四個真裝置
 節點除外）、`/dev/console` 與 `/dev/log/*` 落 rootfs 一般檔案、

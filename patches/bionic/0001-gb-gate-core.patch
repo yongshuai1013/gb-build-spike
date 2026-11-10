@@ -103,7 +103,7 @@ index ada12a6..485c1a2 100644
      stmfd	sp!, {r4, r5, r6, r7}
      mov     r7, r0
 diff --git a/libc/tools/gensyscalls.py b/libc/tools/gensyscalls.py
-index 41c9500..fe64c2c 100755
+index 41c9500..cee5101 100755
 --- a/libc/tools/gensyscalls.py
 +++ b/libc/tools/gensyscalls.py
 @@ -78,6 +78,14 @@ x86_return = """    ret
@@ -112,7 +112,7 @@ index 41c9500..fe64c2c 100755
  #
 +# NOTE (gb-gate, M1): the two EABI templates below route every stub
 +# through the compat dispatcher __gb_gate_pre/__gb_gate_post (see
-+# libc/arch-arm/bionic/gb_gate.c.arm). When the gate has settled to
++# libc/arch-arm/bionic/gb_gate.c). When the gate has settled to
 +# "off" (GBROOT unset) the stub branches to label 10, which is the
 +# original stock sequence verbatim. __sys_clone and vfork are NOT
 +# regenerated from these templates for the gate (their checked-in
