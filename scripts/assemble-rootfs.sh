@@ -20,8 +20,12 @@ mkdir -p rootfs
 
 # Base: ramdisk contents (init, init.rc, ueventd*.rc, default.prop...).
 cp -a "${PD}root/." rootfs/
-# Overlay: the system tree.
-cp -a "${PD}system" rootfs/system
+# Overlay: the system tree. NOTE: the ramdisk root already contains
+# an (empty) system/ mount-point directory, so copy the *contents*
+# over it - "cp -a ${PD}system rootfs/system" would nest the tree at
+# rootfs/system/system/ (gate run 42761838414 died exactly there).
+mkdir -p rootfs/system
+cp -a "${PD}system/." rootfs/system/
 
 # Skeleton the guest (and the app launcher) rely on.
 mkdir -p rootfs/data rootfs/dev/log rootfs/dev/socket

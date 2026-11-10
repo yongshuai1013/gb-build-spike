@@ -65,8 +65,12 @@ LIBC="$PD/system/lib/libc.so"
   echo "== libc: $LIBC =="
   ls -la "$LIBC"
   echo
-  echo "== gate symbols present in libc.so =="
-  "$OBJDUMP" -t "$LIBC" 2>/dev/null | grep -i "gb_gate" || echo "NONE FOUND"
+  echo "== gate symbols present in libc.so (dynamic + symbols/ copy) =="
+  "$OBJDUMP" -T "$LIBC" 2>/dev/null | grep -i "gb_gate" || echo "none in dynamic table"
+  SYMLIBC="$PD/symbols/system/lib/libc.so"
+  if [ -f "$SYMLIBC" ]; then
+    "$OBJDUMP" -t "$SYMLIBC" 2>/dev/null | grep -i "gb_gate" || echo "none in symbols copy"
+  fi
   echo
   for sym in write getpid __open; do
     echo "===== stub: $sym ====="
