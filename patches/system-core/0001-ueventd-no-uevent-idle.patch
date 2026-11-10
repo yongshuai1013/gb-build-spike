@@ -1,0 +1,48 @@
+diff --git a/init/devices.c b/init/devices.c
+index e73efdf..fffde8c 100644
+--- a/init/devices.c
++++ b/init/devices.c
+@@ -64,7 +64,12 @@ static int open_uevent_socket(void)
+ 
+     memset(&addr, 0, sizeof(addr));
+     addr.nl_family = AF_NETLINK;
+-    addr.nl_pid = getpid();
++    /* gb-gate (M1): nl_pid 0 lets the kernel assign our real pid.
++     * Stock code uses getpid(), which the compat layer may report as
++     * a *virtual* pid; binding a netlink socket to a pid that is not
++     * the caller's real pid fails. 0 is semantically identical for a
++     * single uevent listener. */
++    addr.nl_pid = 0;
+     addr.nl_groups = 0xffffffff;
+ 
+     s = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_KOBJECT_UEVENT);
+diff --git a/init/ueventd.c b/init/ueventd.c
+index 0e97be7..ab7ea0a 100644
+--- a/init/ueventd.c
++++ b/init/ueventd.c
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include <poll.h>
++#include <unistd.h> /* gb-gate (M1): pause() for the no-uevent idle loop */
+ #include <fcntl.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -51,6 +52,17 @@ int ueventd_main(int argc, char **argv)
+ 
+     device_init();
+ 
++    if (get_device_fd() < 0) {
++        /* gb-gate (M1): no uevent source is available (netlink socket
++         * or bind failed, e.g. inside an app sandbox, possibly with a
++         * virtualised getpid). Stock code would poll() on fd -1 and
++         * spin at 100% CPU forever. Park instead: the service stays
++         * alive and init does not restart-loop it. */
++        ERROR("ueventd: no uevent socket, idling\n");
++        for (;;)
++            pause();
++    }
++
+     ufd.events = POLLIN;
+     ufd.fd = get_device_fd();
+ 

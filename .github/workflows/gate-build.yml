@@ -1,0 +1,106 @@
+name: gb-gate-build
+
+# M1 workline A pre-checks (DESIGN-M1.md): apply the guest compat
+# patches, build the full tree in the era container, then verify:
+#   (a) disassembly spot-check - libc.so stubs route via __gb_gate_*;
+#   (b) boot regression - the patched tree still passes the four
+#       emulator milestones with GBROOT unset (gate transparent);
+#   (c) gate smoke - qemu-user run of gate_smoke with GBROOT set
+#       against the assembled rootfs;
+#   (d) artifacts - gb-rootfs (rootfs.tar.gz) and gb-gate-report.
+# Manual dispatch only, like the boot baseline, so pushes from the
+# other workline never queue a gate run by accident.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+    steps:
+      - name: Check out spike repo
+        uses: actions/checkout@v4
+
+      - name: Install repo tool (host)
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Restore cached AOSP tree
+        uses: actions/cache/restore@v4
+        with:
+          path: aosp
+          key: aosp-android-2.3.7_r1-v2-shallow
+
+      - name: Sync AOSP android-2.3.7_r1
+        run: bash scripts/sync-tree.sh
+
+      - name: Save AOSP tree to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: aosp
+          key: aosp-android-2.3.7_r1-v2-shallow
+
+      - name: Apply gate patches (idempotent)
+        run: bash scripts/apply-patches.sh
+
+      - name: Download era SDK emulator (r12, fallbacks r11/r10)
+        run: |
+          mkdir -p sdk
+          ok=""
+          for v in r12 r11 r10; do
+            url="https://dl.google.com/android/android-sdk_${v}-linux_x86.tgz"
+            echo "trying $url"
+            if curl -sL --fail "$url" -o /tmp/sdk.tgz; then
+              echo "android-sdk_${v}-linux_x86" > sdk/VERSION.txt
+              ok="$v"
+              break
+            fi
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: no era SDK could be downloaded"
+            exit 1
+          fi
+          tar -xzf /tmp/sdk.tgz -C sdk
+          ls -la sdk/android-sdk-linux_x86/tools/emulator
+
+      - name: Build patched tree + probes + disasm + boot regression (era container)
+        run: bash scripts/gate-tree.sh
+
+      - name: Assemble rootfs artifact tree
+        if: always()
+        run: bash scripts/assemble-rootfs.sh
+
+      - name: Gate smoke under qemu-user (GBROOT on)
+        if: always()
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
+          qemu-arm-static --version
+          bash scripts/qemu-smoke.sh
+
+      - name: Collect gate report
+        if: always()
+        run: bash scripts/collect-gate-report.sh
+
+      - name: Upload gate report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-gate-report
+          path: gate-report/
+          if-no-files-found: warn
+
+      - name: Upload rootfs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-rootfs
+          path: |
+            rootfs.tar.gz
+            rootfs-listing.txt
+          if-no-files-found: warn

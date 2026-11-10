@@ -217,3 +217,52 @@ apksigner 驗簽＋指紋斷言＋aapt badging 檢查 → 上傳 artifact
 heartbeat，`GBROOT_ONCE=1` 時跑一拍即退）＋最小骨架，讓殼的
 解壓／啟動／日誌／匯出全鏈可先驗證。換上真 artifact 後佔位即被
 取代，不需改 App 代碼（戳記是 asset 內容雜湊）。
+
+## M1-A：客體 gate 改造＋構建管線＋CI 預檢（工作線 A）
+
+架構定調見 `DESIGN-M1.md`（含文末 WS-A 實作註記）。交付物：
+
+- `patches/`——客體補丁（bionic 三件、system/core 一件）＋
+  `patches/README.md` 補丁清單（逐檔：改動、理由、行為差異、
+  核實免補丁兩項的證據）。
+- `probes/`——gbexec 跳板與煙霧測試組（`gate_smoke`、`gate_helper`、
+  `gate_helper_dyn`），CI 以 `scripts/apply-patches.sh` 複製進樹
+  `external/gate_probes/` 後顯式構建。
+- `.github/workflows/gate-build.yml`——手動觸發的 gate 構建
+  workflow（不動既有 build.yml／boot.yml）：sync（沿用同一 cache
+  key）→套補丁→容器內全量 make＋探針構建→三項預檢→產出
+  `gb-rootfs`（rootfs.tar.gz＋清單）與 `gb-gate-report` 兩件
+  artifact。
+
+### compat 摘要
+
+改造後 bionic 的每個 ARM EABI syscall 樁先進 compat 分發器
+`__gb_gate()`（`libc/arch-arm/bionic/gb_gate.c.arm`）。`GBROOT`
+未設定時分發器定案「關」，樁走原版指令序列逐字版（透明）；
+設定時：絕對路徑加 `$GBROOT` 前綴（`/proc`、`/sys` 與四個真裝置
+節點除外）、`/dev/console` 與 `/dev/log/*` 落 rootfs 一般檔案、
+`/dev/binder` 給 dummy fd 並假辦 ioctl（VERSION 回 protocol 7、
+WRITE_READ 停泊呼叫線程；binder 傳輸未實作，屬 M2）、
+getpid 回 `$GBVPID` 虛擬值、fork 子行程認領預備 vpid（父回真
+pid 並記對照）、getuid/geteuid 回 0、execve 對動態程式改走
+gbexec＋客體 linker（DESIGN 原案的「linker 以參數執行」經查
+2.3.7 源碼不存在，偏差與理由見 DESIGN 文末註記 1）。
+
+### 本機先行驗證（推 CI 前，qemu-user＋ARM 交叉工具鏈）
+
+- 分發器＋兩種模板樁＋syscall.S／kill.S 改版組譯連結成 freestanding
+  測試台實跑：gate 開——vpid／uid 虛擬、路徑翻譯落檔、console、
+  binder VERSION=7、fork 子 vpid=4243、long 模板 llseek、計數器，
+  全過；gate 關——getpid 回真值、路徑不譯、mode 定案 2，全過。
+  唯一未過項 execve 子行程狀態，經純 glibc 複現證明是該 qemu
+  版本 guest execve 重執行自身的 ENOEXEC 缺陷（-strace 證實樁已
+  以譯後路徑發出 execve），非 gate 問題；CI 煙霧因此以 strace
+  的譯後路徑為 exec 證據、探針內 exec 結果僅作參考證據。
+- gbexec 力學：以手寫假 linker（ET_EXEC@0xB0001000）驗證映射＋
+  造棧＋跳轉：假 linker 正確讀到目標 argc/argv 並退場 42。
+  真 GB linker 全鏈路待 CI 煙霧 exec_dynamic 項證據。
+
+### CI 預檢結果
+
+（待 gate-build 首跑後填入：run 號、三項預檢逐項結果、artifact
+大小。）

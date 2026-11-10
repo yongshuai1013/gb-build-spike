@@ -1,0 +1,827 @@
+diff --git a/libc/arch-arm/bionic/gb_gate.c.arm b/libc/arch-arm/bionic/gb_gate.c.arm
+new file mode 100644
+index 0000000..ba98c5b
+--- /dev/null
++++ b/libc/arch-arm/bionic/gb_gate.c.arm
+@@ -0,0 +1,821 @@
++/*
++ * gb_gate.c.arm - Gingerbread guest compat dispatcher (M1, workline A).
++ *
++ * Every generated ARM EABI syscall stub in this libc passes through
++ * __gb_gate_pre()/__gb_gate_post() (see libc/tools/gensyscalls.py and
++ * arch-arm/syscalls/*.S). When the GBROOT environment variable is not
++ * set, the mode byte __gb_gate_mode settles to 2 ("off") and the stubs
++ * execute their original instruction sequence verbatim, so an
++ * unmodified boot (e.g. the emulator baseline) is bit-for-bit the
++ * stock behaviour. When GBROOT is set, this dispatcher implements the
++ * M1 compat table from DESIGN-M1.md:
++ *
++ *   - absolute paths are prefixed with $GBROOT (except /proc, /sys and
++ *     the host-true device nodes /dev/null, /dev/zero, /dev/urandom,
++ *     /dev/random); overlong results fail with ENAMETOOLONG.
++ *   - /dev/console and /dev/log/* therefore land on plain files inside
++ *     the rootfs; /dev/binder opens a dummy fd (/dev/null) whose
++ *     ioctls are faked (BINDER_VERSION, BINDER_WRITE_READ parks the
++ *     caller, everything else returns success).
++ *   - getpid() returns the virtual pid from $GBVPID; fork() children
++ *     claim the next vpid prepared by the parent; the parent keeps the
++ *     real pid as its return value and records the real<->virtual map
++ *     so pid-taking syscalls (kill, setpgid, wait4, ...) can be
++ *     translated back. getuid()/geteuid() return 0.
++ *   - execve() rewrites dynamic executables (PT_INTERP) to the static
++ *     trampoline /system/bin/gbexec (the stock GB linker cannot be
++ *     invoked with a program argument; see probes/gbexec.c) and makes
++ *     sure the child environment carries GBVPID and LD_LIBRARY_PATH.
++ *
++ * This file is compiled in ARM mode (the .arm suffix) and must never
++ * call a libc function that itself performs a syscall through a stub
++ * (open, getenv, malloc, ...): all kernel interaction below uses raw
++ * svc instructions, and environment access walks `environ` directly.
++ */
++
++#include <stddef.h>
++#include <errno.h>
++#include <sys/linux-syscalls.h>
++
++/* kill has no generated stub in this tree (it is the handwritten
++ * arch-arm/bionic/kill.S), so SYSCALLS.TXT gives it no __NR_ define. */
++#ifndef __NR_kill
++#define __NR_kill 37
++#endif
++
++extern char **environ;
++
++/* Minimal ELF32 views (avoid depending on the tree's <elf.h> include
++ * chain; only the fields the execve handling reads). */
++struct gb_ehdr {
++    unsigned char e_ident[16];
++    unsigned short e_type;
++    unsigned short e_machine;
++    unsigned int e_version;
++    unsigned int e_entry;
++    unsigned int e_phoff;
++    unsigned int e_flags;
++    unsigned short e_ehsize;
++    unsigned short e_phentsize;
++    unsigned short e_phnum;
++};
++struct gb_phdr {
++    unsigned int p_type;
++    unsigned int p_offset;
++    unsigned int p_vaddr;
++    unsigned int p_paddr;
++    unsigned int p_filesz;
++    unsigned int p_memsz;
++    unsigned int p_flags;
++    unsigned int p_align;
++};
++#define GB_PT_INTERP 3
++
++/* 0 = unknown (resolve lazily), 1 = on, 2 = off. Read by the stubs. */
++unsigned char __gb_gate_mode = 0;
++
++/* Smoke/observability counters (read by probes/gate_smoke.c). */
++unsigned int __gb_gate_pre_calls = 0;
++unsigned int __gb_gate_handled = 0;
++
++/* Action bits returned by __gb_gate_pre(). */
++#define GB_ACT_SKIP_SVC  1
++#define GB_ACT_SKIP_POST 2
++
++/* Binder ioctl numbers, from libc/kernel/common/linux/binder.h. */
++#define GB_IOC(dir, type, nr, size) \
++    (((dir) << 30) | ((size) << 16) | ((type) << 8) | (nr))
++#define GB_BINDER_WRITE_READ      GB_IOC(3, 'b', 1, 24)
++#define GB_BINDER_SET_MAX_THREADS GB_IOC(1, 'b', 5, 4)
++#define GB_BINDER_SET_CONTEXT_MGR GB_IOC(1, 'b', 7, 4)
++#define GB_BINDER_VERSION         GB_IOC(3, 'b', 9, 4)
++#define GB_BINDER_PROTOCOL_VERSION 7
++
++#define GB_PATH_MAX 1024
++#define GB_PATH_SLOTS 16
++#define GB_ROOT_MAX 256
++#define GB_PIDMAP_MAX 128
++#define GB_BINDER_FD_MAX 64
++
++static char gb_root[GB_ROOT_MAX];
++static int  gb_root_len = 0;
++static long gb_my_vpid = 0;      /* 0 = no virtual identity */
++static long gb_my_real_pid = 0;
++static long gb_vpid_counter = 0;
++static long gb_pending_vpid = 0;
++
++static char gb_path_ring[GB_PATH_SLOTS][GB_PATH_MAX];
++static unsigned int gb_path_ring_next = 0;
++
++static long gb_pidmap_real[GB_PIDMAP_MAX];
++static long gb_pidmap_virt[GB_PIDMAP_MAX];
++static int  gb_binder_fds[GB_BINDER_FD_MAX];
++
++/* ---- raw syscalls (never through the gated stubs) ---- */
++
++static long gb_raw6(long nr, long a0, long a1, long a2, long a3, long a4, long a5)
++{
++    register long r0 __asm__("r0") = a0;
++    register long r1 __asm__("r1") = a1;
++    register long r2 __asm__("r2") = a2;
++    register long r3 __asm__("r3") = a3;
++    register long r4 __asm__("r4") = a4;
++    register long r5 __asm__("r5") = a5;
++    register long r7 __asm__("r7") = nr;
++    __asm__ volatile ("swi #0"
++        : "+r" (r0)
++        : "r" (r1), "r" (r2), "r" (r3), "r" (r4), "r" (r5), "r" (r7)
++        : "memory");
++    return r0;
++}
++
++static long gb_raw_open(const char *path, long flags, long mode)
++{
++    return gb_raw6(__NR_open, (long) path, flags, mode, 0, 0, 0);
++}
++
++static long gb_raw_read(long fd, void *buf, long count)
++{
++    return gb_raw6(__NR_read, fd, (long) buf, count, 0, 0, 0);
++}
++
++static long gb_raw_close(long fd)
++{
++    return gb_raw6(__NR_close, fd, 0, 0, 0, 0, 0);
++}
++
++static long gb_raw_getpid(void)
++{
++    return gb_raw6(__NR_getpid, 0, 0, 0, 0, 0, 0);
++}
++
++/* ---- tiny string helpers (no libc calls) ---- */
++
++static int gb_strlen(const char *s)
++{
++    int n = 0;
++    while (s[n]) n++;
++    return n;
++}
++
++static int gb_strcmp(const char *a, const char *b)
++{
++    while (*a && *a == *b) { a++; b++; }
++    return (unsigned char) *a - (unsigned char) *b;
++}
++
++static int gb_strncmp(const char *a, const char *b, int n)
++{
++    int i;
++    for (i = 0; i < n; i++) {
++        if (a[i] != b[i] || a[i] == 0)
++            return (unsigned char) a[i] - (unsigned char) b[i];
++    }
++    return 0;
++}
++
++static void gb_strcpy(char *dst, const char *src)
++{
++    while ((*dst++ = *src++) != 0) { }
++}
++
++static long gb_atol(const char *s)
++{
++    long v = 0;
++    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
++    return v;
++}
++
++static char *gb_env_get(const char *name)
++{
++    int n = gb_strlen(name);
++    int i;
++    if (environ == 0) return 0;
++    for (i = 0; environ[i]; i++) {
++        if (gb_strncmp(environ[i], name, n) == 0 && environ[i][n] == '=')
++            return environ[i] + n + 1;
++    }
++    return 0;
++}
++
++/* ---- spinlock via the ARM kernel cmpxchg helper (works on ARMv5) ---- */
++
++typedef int (*gb_cmpxchg_t)(int oldval, int newval, volatile int *ptr);
++#define GB_KERNEL_CMPXCHG ((gb_cmpxchg_t) 0xffff0fc0)
++
++static volatile int gb_lock_word = 0;
++
++static void gb_lock(void)
++{
++    while (GB_KERNEL_CMPXCHG(0, 1, &gb_lock_word) != 0) {
++        gb_raw6(__NR_sched_yield, 0, 0, 0, 0, 0, 0);
++    }
++}
++
++static void gb_unlock(void)
++{
++    gb_lock_word = 0;
++    __asm__ volatile ("" ::: "memory");
++}
++
++/* Separate lock held across a fork() svc by the forking thread; the
++ * child inherits (and releases) its own copy. */
++static volatile int gb_fork_lock_word = 0;
++
++static void gb_fork_lock(void)
++{
++    while (GB_KERNEL_CMPXCHG(0, 1, &gb_fork_lock_word) != 0) {
++        gb_raw6(__NR_sched_yield, 0, 0, 0, 0, 0, 0);
++    }
++}
++
++static void gb_fork_unlock(void)
++{
++    gb_fork_lock_word = 0;
++    __asm__ volatile ("" ::: "memory");
++}
++
++/* ---- mode resolution ---- */
++
++/* Returns 1 when the gate is on for this process, 0 when off. While
++ * `environ` is not yet installed (very early libc initialisation) the
++ * call is treated as off but the decision is NOT cached: the mode byte
++ * stays 0 ("unknown") and resolution is retried on the next syscall. */
++static int gb_resolve(void)
++{
++    char *root;
++    char *vpid;
++    int len;
++
++    if (__gb_gate_mode == 1) return 1;
++    if (__gb_gate_mode == 2) return 0;
++    if (environ == 0) return 0;
++
++    root = gb_env_get("GBROOT");
++    if (root == 0 || root[0] == 0) {
++        __gb_gate_mode = 2;
++        return 0;
++    }
++    len = gb_strlen(root);
++    while (len > 1 && root[len - 1] == '/') len--;
++    if (len >= GB_ROOT_MAX) {
++        __gb_gate_mode = 2;
++        return 0;
++    }
++    {
++        int i;
++        for (i = 0; i < len; i++) gb_root[i] = root[i];
++        gb_root[len] = 0;
++    }
++    gb_root_len = len;
++    vpid = gb_env_get("GBVPID");
++    gb_my_vpid = vpid ? gb_atol(vpid) : 0;
++    gb_vpid_counter = gb_my_vpid;
++    gb_my_real_pid = gb_raw_getpid();
++    {
++        int i;
++        for (i = 0; i < GB_BINDER_FD_MAX; i++) gb_binder_fds[i] = -1;
++    }
++    __gb_gate_mode = 1;
++    return 1;
++}
++
++/* Claim the next path-translation slot. The pointer stays valid until
++ * the ring wraps (16 concurrent translations), which covers the
++ * pre()->svc window; see DESIGN-M1.md notes. */
++static char *gb_path_slot(void)
++{
++    char *slot;
++    gb_lock();
++    slot = gb_path_ring[gb_path_ring_next];
++    gb_path_ring_next = (gb_path_ring_next + 1) % GB_PATH_SLOTS;
++    gb_unlock();
++    return slot;
++}
++
++/* Translate an absolute guest path into a host path inside $GBROOT.
++ * Returns the original pointer for paths that must stay host-true
++ * (and for relative paths), a ring slot for translated paths, or
++ * (char *) -1 when the result would overflow the slot. */
++static char *gb_translate(const char *path)
++{
++    int plen;
++    char *out;
++    int i;
++
++    if (path == 0 || path[0] != '/') return (char *) path;
++    if (gb_strcmp(path, "/proc") == 0 || gb_strncmp(path, "/proc/", 6) == 0)
++        return (char *) path;
++    if (gb_strcmp(path, "/sys") == 0 || gb_strncmp(path, "/sys/", 5) == 0)
++        return (char *) path;
++    if (gb_strcmp(path, "/dev/null") == 0 ||
++        gb_strcmp(path, "/dev/zero") == 0 ||
++        gb_strcmp(path, "/dev/urandom") == 0 ||
++        gb_strcmp(path, "/dev/random") == 0)
++        return (char *) path;
++
++    plen = gb_strlen(path);
++    if (gb_root_len + plen >= GB_PATH_MAX) return (char *) -1;
++    out = gb_path_slot();
++    for (i = 0; i < gb_root_len; i++) out[i] = gb_root[i];
++    for (i = 0; i <= plen; i++) out[gb_root_len + i] = path[i];
++    return out;
++}
++
++/* ---- pid map (real <-> virtual) and binder fd set ---- */
++
++static void gb_pidmap_add(long real, long virt)
++{
++    int i;
++    gb_lock();
++    for (i = 0; i < GB_PIDMAP_MAX; i++) {
++        if (gb_pidmap_real[i] == 0) {
++            gb_pidmap_real[i] = real;
++            gb_pidmap_virt[i] = virt;
++            break;
++        }
++    }
++    gb_unlock();
++}
++
++static long gb_real_of_virt(long virt)
++{
++    int i;
++    long r = 0;
++    gb_lock();
++    for (i = 0; i < GB_PIDMAP_MAX; i++) {
++        if (gb_pidmap_virt[i] == virt) { r = gb_pidmap_real[i]; break; }
++    }
++    gb_unlock();
++    return r;
++}
++
++/* Translate a pid argument that may name a virtual pid back to the
++ * real kernel pid. Plain values (<= 0, unknown pids) pass through. */
++static long gb_fix_pid(long pid)
++{
++    long r;
++    if (pid <= 0) return pid;
++    if (gb_my_vpid != 0 && pid == gb_my_vpid) {
++        if (gb_my_real_pid == 0) gb_my_real_pid = gb_raw_getpid();
++        return gb_my_real_pid;
++    }
++    r = gb_real_of_virt(pid);
++    return r ? r : pid;
++}
++
++/* Used by the handwritten kill stub (arch-arm/bionic/kill.S). */
++long __gb_gate_fix_pid(long pid)
++{
++    if (!gb_resolve()) return pid;
++    return gb_fix_pid(pid);
++}
++
++static void gb_binder_fd_add(long fd)
++{
++    int i;
++    gb_lock();
++    for (i = 0; i < GB_BINDER_FD_MAX; i++) {
++        if (gb_binder_fds[i] == -1) { gb_binder_fds[i] = (int) fd; break; }
++    }
++    gb_unlock();
++}
++
++static void gb_binder_fd_del(long fd)
++{
++    int i;
++    gb_lock();
++    for (i = 0; i < GB_BINDER_FD_MAX; i++) {
++        if (gb_binder_fds[i] == (int) fd) gb_binder_fds[i] = -1;
++    }
++    gb_unlock();
++}
++
++static int gb_binder_fd_is(long fd)
++{
++    int i;
++    int found = 0;
++    gb_lock();
++    for (i = 0; i < GB_BINDER_FD_MAX; i++) {
++        if (gb_binder_fds[i] == (int) fd) { found = 1; break; }
++    }
++    gb_unlock();
++    return found;
++}
++
++/* ---- execve support ---- */
++
++static char  gb_exec_tpath[GB_PATH_MAX];
++static char  gb_exec_hostpath[GB_PATH_MAX];
++static char *gb_exec_argv[64];
++static char *gb_exec_envp[128];
++static char  gb_exec_env_vpid[40];
++static char  gb_exec_env_ld[GB_PATH_MAX + 32];
++
++/* Build "GBVPID=<n>" into gb_exec_env_vpid. */
++static void gb_make_vpid_env(void)
++{
++    char tmp[24];
++    int i = 0, j = 0;
++    long v = gb_my_vpid;
++    const char *p = "GBVPID=";
++    while (p[j]) { gb_exec_env_vpid[j] = p[j]; j++; }
++    if (v == 0) tmp[i++] = '0';
++    while (v > 0) { tmp[i++] = (char) ('0' + (v % 10)); v /= 10; }
++    while (i > 0) gb_exec_env_vpid[j++] = tmp[--i];
++    gb_exec_env_vpid[j] = 0;
++}
++
++/* Build the child environment: the caller's entries minus any stale
++ * GBVPID/LD_LIBRARY_PATH, plus our GBVPID and an LD_LIBRARY_PATH that
++ * points inside the rootfs (host-absolute, so the guest linker, which
++ * performs no path translation, finds the guest libraries). Returns
++ * the array or NULL when there are too many entries. */
++static char **gb_build_env(char *const *envp)
++{
++    int n = 0, out = 0;
++    if (envp) {
++        while (envp[n]) {
++            const char *e = envp[n];
++            if (gb_strncmp(e, "GBVPID=", 7) != 0 &&
++                gb_strncmp(e, "LD_LIBRARY_PATH=", 16) != 0) {
++                if (out >= 125) return 0;
++                gb_exec_envp[out++] = (char *) e;
++            }
++            n++;
++        }
++    }
++    gb_make_vpid_env();
++    gb_exec_envp[out++] = gb_exec_env_vpid;
++    {
++        const char *p = "LD_LIBRARY_PATH=";
++        int i = 0, j = 0;
++        while (p[i]) { gb_exec_env_ld[i] = p[i]; i++; }
++        while (gb_root[j]) { gb_exec_env_ld[i++] = gb_root[j++]; }
++        p = "/system/lib:";
++        j = 0;
++        while (p[j]) { gb_exec_env_ld[i++] = p[j++]; }
++        j = 0;
++        while (gb_root[j]) { gb_exec_env_ld[i++] = gb_root[j++]; }
++        p = "/vendor/lib";
++        j = 0;
++        while (p[j]) { gb_exec_env_ld[i++] = p[j++]; }
++        gb_exec_env_ld[i] = 0;
++    }
++    gb_exec_envp[out++] = gb_exec_env_ld;
++    gb_exec_envp[out] = 0;
++    return gb_exec_envp;
++}
++
++/* 1 when the (host-translated) file is an ELF with a PT_INTERP, 0 when
++ * it is not, -1 when it cannot be read (the caller then lets the real
++ * execve produce the error). */
++static int gb_has_interp(const char *hostpath)
++{
++    unsigned char buf[4096];
++    long fd, n, i;
++    struct gb_ehdr *e;
++    struct gb_phdr *ph;
++    long phsize;
++
++    fd = gb_raw_open(hostpath, 0 /* O_RDONLY */, 0);
++    if (fd < 0) return -1;
++    n = gb_raw_read(fd, buf, 52);
++    if (n < 52) { gb_raw_close(fd); return -1; }
++    e = (struct gb_ehdr *) buf;
++    if (e->e_ident[0] != 0x7f || e->e_ident[1] != 'E' ||
++        e->e_ident[2] != 'L' || e->e_ident[3] != 'F') {
++        gb_raw_close(fd);
++        return 0; /* not an ELF: execve will fail with ENOEXEC */
++    }
++    if (e->e_phoff == 0 || e->e_phnum == 0 || e->e_phnum > 128) {
++        gb_raw_close(fd);
++        return 0;
++    }
++    phsize = (long) e->e_phnum * 32;
++    if ((long) e->e_phoff + phsize > (long) sizeof(buf)) {
++        gb_raw_close(fd);
++        return -1;
++    }
++    /* Seek back to 0 and read header + program headers in one go. */
++    gb_raw6(__NR_lseek, fd, 0, 0, 0, 0, 0);
++    n = gb_raw_read(fd, buf, (long) e->e_phoff + phsize);
++    gb_raw_close(fd);
++    if (n < (long) e->e_phoff + phsize) return -1;
++    for (i = 0; i < e->e_phnum; i++) {
++        ph = (struct gb_phdr *) (buf + e->e_phoff + i * 32);
++        if (ph->p_type == GB_PT_INTERP) return 1;
++    }
++    return 0;
++}
++
++/* execve pre-handling. Rewrites args in place; returns an action. */
++static long gb_pre_execve(long *args, long *skip_result)
++{
++    const char *path = (const char *) args[0];
++    char *tpath;
++    char **new_env;
++    int dyn, i;
++
++    if (path == 0 || path[0] != '/') return 0;
++    tpath = gb_translate(path);
++    if (tpath == (char *) -1) {
++        *skip_result = -ENAMETOOLONG;
++        __gb_gate_handled++;
++        return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++    }
++    /* Keep a private copy: the ring slot stays valid too, but the argv
++     * array built below points at the guest path, not the slot. */
++    gb_strcpy(gb_exec_tpath, tpath);
++
++    new_env = gb_build_env((char *const *) args[2]);
++    dyn = gb_has_interp(gb_exec_tpath);
++    if (dyn == 1) {
++        char *const *oargv = (char *const *) args[1];
++        int n = 0;
++        if (oargv) while (oargv[n] && n < 60) n++;
++        gb_exec_argv[0] = "/system/bin/gbexec";
++        gb_exec_argv[1] = (char *) path;
++        for (i = 0; i < n; i++) gb_exec_argv[2 + i] = (char *) oargv[i];
++        gb_exec_argv[2 + n] = 0;
++        /* Host path of the trampoline: $GBROOT/system/bin/gbexec */
++        {
++            int j = 0, k = 0;
++            const char *sfx = "/system/bin/gbexec";
++            while (gb_root[j]) { gb_exec_hostpath[k++] = gb_root[j++]; }
++            j = 0;
++            while (sfx[j]) { gb_exec_hostpath[k++] = sfx[j++]; }
++            gb_exec_hostpath[k] = 0;
++        }
++        args[0] = (long) gb_exec_hostpath;
++        args[1] = (long) gb_exec_argv;
++        __gb_gate_handled++;
++    } else {
++        args[0] = (long) gb_exec_tpath;
++    }
++    if (new_env) args[2] = (long) new_env;
++    return 0;
++}
++
++/* ---- generic path-argument table ---- */
++
++struct gb_patharg { long nr; int idx0; int idx1; };
++
++static const struct gb_patharg gb_pathargs[] = {
++    { __NR_access,   0, -1 },
++    { __NR_chmod,    0, -1 },
++#ifdef __NR_chown
++    { __NR_chown,    0, -1 },
++#endif
++#ifdef __NR_lchown
++    { __NR_lchown,   0, -1 },
++#endif
++    { __NR_chdir,    0, -1 },
++    { __NR_mkdir,    0, -1 },
++    { __NR_rmdir,    0, -1 },
++    { __NR_unlink,   0, -1 },
++    { __NR_rename,   0,  1 },
++    { __NR_link,     0,  1 },
++    /* symlink: arg0 is the link *content* (stored verbatim), only the
++     * link path (arg1) is a lookup path. */
++    { __NR_symlink, -1,  1 },
++    { __NR_readlink, 0, -1 },
++    { __NR_stat64,   0, -1 },
++    { __NR_lstat64,  0, -1 },
++#ifdef __NR_truncate
++    { __NR_truncate, 0, -1 },
++#endif
++#ifdef __NR_mknod
++    { __NR_mknod,    0, -1 },
++#endif
++#ifdef __NR_statfs
++    { __NR_statfs,   0, -1 },
++#endif
++#ifdef __NR_statfs64
++    { __NR_statfs64, 0, -1 },
++#endif
++    { __NR_inotify_add_watch, -1, 1 },
++#ifdef __NR_faccessat
++    { __NR_faccessat, -1, 1 },
++#endif
++#ifdef __NR_utimensat
++    { __NR_utimensat, -1, 1 },
++#endif
++    { __NR_renameat,  1,  3 },
++    { 0, -1, -1 }
++};
++
++/* Translate one path argument in place. Returns 0 on success (or when
++ * the path needs no translation) and -1 on overflow. */
++static int gb_translate_arg(long *args, int idx)
++{
++    const char *p = (const char *) args[idx];
++    char *t;
++    if (p == 0 || p[0] != '/') return 0;
++    t = gb_translate(p);
++    if (t == (char *) -1) return -1;
++    args[idx] = (long) t;
++    return 0;
++}
++
++/* /dev/binder: hand out a dummy fd. Returns 1 when handled. */
++static int gb_pre_binder_open(long *skip_result)
++{
++    long fd = gb_raw_open("/dev/null", 2 /* O_RDWR */, 0);
++    if (fd >= 0) gb_binder_fd_add(fd);
++    *skip_result = fd;
++    __gb_gate_handled++;
++    return 1;
++}
++
++struct gb_sockaddr_un {
++    unsigned short sun_family;
++    char sun_path[108];
++};
++
++/* ---- pre-dispatch: may rewrite args; action bits say what the stub
++ * does next (perform the svc with the possibly rewritten args, or take
++ * *skip_result as the raw result; optionally skip the post call). ---- */
++long __gb_gate_pre(long nr, long *args, long *skip_result)
++{
++    unsigned int i;
++
++    __gb_gate_pre_calls++;
++    if (!gb_resolve()) return 0;
++
++#ifdef __NR_fork
++    if (nr == __NR_fork) {
++        gb_fork_lock();
++        gb_pending_vpid = ++gb_vpid_counter;
++        return 0;
++    }
++#endif
++    if (nr == __NR_execve) return gb_pre_execve(args, skip_result);
++
++    if (nr == __NR_open) {
++        const char *p = (const char *) args[0];
++        if (p && gb_strcmp(p, "/dev/binder") == 0) {
++            gb_pre_binder_open(skip_result);
++            return GB_ACT_SKIP_SVC;
++        }
++        if (gb_translate_arg(args, 0) != 0) {
++            *skip_result = -ENAMETOOLONG;
++            __gb_gate_handled++;
++            return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++        }
++        return 0;
++    }
++    if (nr == __NR_openat) {
++        const char *p = (const char *) args[1];
++        if (p && gb_strcmp(p, "/dev/binder") == 0) {
++            gb_pre_binder_open(skip_result);
++            return GB_ACT_SKIP_SVC;
++        }
++        if (gb_translate_arg(args, 1) != 0) {
++            *skip_result = -ENAMETOOLONG;
++            __gb_gate_handled++;
++            return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++        }
++        return 0;
++    }
++
++    if (nr == __NR_ioctl) {
++        if (gb_binder_fd_is(args[0])) {
++            unsigned int req = (unsigned int) args[1];
++            if (req == GB_BINDER_VERSION) {
++                if (args[2]) *(long *) args[2] = GB_BINDER_PROTOCOL_VERSION;
++                *skip_result = 0;
++                __gb_gate_handled++;
++                return GB_ACT_SKIP_SVC;
++            }
++            if (req == GB_BINDER_WRITE_READ) {
++                /* Park the caller like a thread blocked in the binder
++                 * driver: the process stays alive (servicemanager in
++                 * its binder_loop) but no transfer is implemented. */
++                for (;;) gb_raw6(__NR_pause, 0, 0, 0, 0, 0, 0);
++            }
++            /* SET_MAX_THREADS, SET_CONTEXT_MGR and anything else on
++             * the dummy fd: succeed silently. */
++            *skip_result = 0;
++            __gb_gate_handled++;
++            return GB_ACT_SKIP_SVC;
++        }
++        return 0;
++    }
++
++    if (nr == __NR_close) {
++        if (gb_binder_fd_is(args[0])) gb_binder_fd_del(args[0]);
++        return 0;
++    }
++
++    if (nr == __NR_kill) { args[0] = gb_fix_pid(args[0]); return 0; }
++    if (nr == __NR_setpgid) { args[1] = gb_fix_pid(args[1]); return 0; }
++    if (nr == __NR_getpgid) { args[0] = gb_fix_pid(args[0]); return 0; }
++#ifdef __NR_getsid
++    if (nr == __NR_getsid) { args[0] = gb_fix_pid(args[0]); return 0; }
++#endif
++    if (nr == __NR_wait4) { args[0] = gb_fix_pid(args[0]); return 0; }
++#ifdef __NR_waitid
++    if (nr == __NR_waitid && args[0] == 1 /* P_PID */) {
++        args[1] = gb_fix_pid(args[1]);
++        return 0;
++    }
++#endif
++#ifdef __NR_ioprio_set
++    if (nr == __NR_ioprio_set && args[0] == 1 /* IOPRIO_WHO_PROCESS */) {
++        args[1] = gb_fix_pid(args[1]);
++        return 0;
++    }
++#endif
++
++    if (nr == __NR_bind || nr == __NR_connect) {
++        struct gb_sockaddr_un *sa = (struct gb_sockaddr_un *) args[1];
++        if (sa && args[2] >= 3 && sa->sun_family == 1 /* AF_UNIX */ &&
++            sa->sun_path[0] == '/') {
++            char *t = gb_translate(sa->sun_path);
++            struct gb_sockaddr_un *copy;
++            int j;
++            if (t == (char *) -1 || gb_strlen(t) >= 108) {
++                *skip_result = -ENAMETOOLONG;
++                __gb_gate_handled++;
++                return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++            }
++            copy = (struct gb_sockaddr_un *) gb_path_slot();
++            copy->sun_family = 1;
++            for (j = 0; j < 108; j++) copy->sun_path[j] = 0;
++            gb_strcpy(copy->sun_path, t);
++            args[1] = (long) copy;
++            args[2] = 2 + gb_strlen(t) + 1;
++        }
++        return 0;
++    }
++
++    for (i = 0; gb_pathargs[i].nr != 0; i++) {
++        if (gb_pathargs[i].nr == nr) {
++            if (gb_pathargs[i].idx0 >= 0 &&
++                gb_translate_arg(args, gb_pathargs[i].idx0) != 0)
++                goto toolong;
++            if (gb_pathargs[i].idx1 >= 0 &&
++                gb_translate_arg(args, gb_pathargs[i].idx1) != 0)
++                goto toolong;
++            return 0;
++        }
++    }
++    return 0;
++
++toolong:
++    *skip_result = -ENAMETOOLONG;
++    __gb_gate_handled++;
++    return GB_ACT_SKIP_SVC | GB_ACT_SKIP_POST;
++}
++
++/* ---- post-dispatch: may replace the raw svc result. ---- */
++long __gb_gate_post(long nr, long *args, long result)
++{
++    /* __gb_gate_pre() ran first and resolved the mode; when the gate
++     * is off (or was still unresolved because `environ` was not yet
++     * installed) there is nothing to settle here. */
++    if (__gb_gate_mode != 1) return result;
++
++    if (nr == __NR_getpid) {
++        if (gb_my_vpid != 0) return gb_my_vpid;
++        return result;
++    }
++    if (nr == __NR_getuid32 || nr == __NR_geteuid32) return 0;
++
++#ifdef __NR_fork
++    if (nr == __NR_fork) {
++        /* No pending vpid means pre() did not prepare one (the gate
++         * was off for this call): nothing to settle, no lock held. */
++        if (gb_pending_vpid == 0) return result;
++        if (result == 0) {
++            /* Child: claim the vpid the parent prepared. */
++            gb_my_vpid = gb_pending_vpid;
++            gb_vpid_counter = gb_my_vpid;
++            gb_my_real_pid = gb_raw_getpid();
++        } else if (result > 0) {
++            /* Parent: keeps the REAL pid as fork()'s return value and
++             * records the mapping for pid-argument translation. */
++            if (gb_pending_vpid != 0)
++                gb_pidmap_add(result, gb_pending_vpid);
++        }
++        gb_pending_vpid = 0;
++        gb_fork_unlock();
++        return result;
++    }
++#endif
++
++    if (result >= 0) {
++        if (nr == __NR_dup || nr == __NR_dup2
++#ifdef __NR_dup3
++            || nr == __NR_dup3
++#endif
++            ) {
++            if (gb_binder_fd_is(args[0])) gb_binder_fd_add(result);
++        } else if (nr == __NR_fcntl || nr == __NR_fcntl64) {
++            if (args[1] == 0 /* F_DUPFD */ && gb_binder_fd_is(args[0]))
++                gb_binder_fd_add(result);
++        }
++    }
++    return result;
++}
