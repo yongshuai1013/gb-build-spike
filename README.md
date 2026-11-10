@@ -43,9 +43,63 @@ arm-eabi-4.4.3 工具鏈 SHA-256 `fe166ff8…`）；本探針驗的是整棵樹�
 
 `workflow_dispatch` 手動觸發，或 push 到 `main`。
 
-## 驗證結論
+## 驗證結論（2026-11-10）
 
-（待首輪成功後回填：實際配方差異、總耗時、樹規模。）
+**結論：可行。** run 42744326975 全綠，`make` rc=0。端到端約 20 分鐘
+（其中全量 `make -j4` 1100 秒），產出完整 `generic-eng` 系統樹。
+
+### 確認的環境配方
+
+- 宿主：GitHub `ubuntu-22.04` runner；樹以 `repo init --depth=1 -b
+  android-2.3.7_r1`＋`repo sync -c` 拉取——淺樹 4.0 GB、cache 壓縮後
+  1.9 GB（全歷史樹 33 GB，超過 cache 上限，不可用）。修訂號與釘版
+  一致：bionic `3f14ff34dfbd00fcffb18b10a1a3e17e2cc5ebdf`、
+  system/core `838a24ac661dfb5147dd584e6dc36dc74c61725e`。
+- 容器：`ubuntu:12.04`（precise；10.04 映像是 manifest schema 1
+  被現代 Docker 拒收）。apt 源改指 `old-releases.ubuntu.com`；
+  套件分三組裝（precise 早期 multiarch 的 `:i386` -dev 會與 amd64
+  衝突）：核心工具鏈組、32 位運行庫組、`:i386` -dev 選裝組。
+  實測版本：OpenJDK 1.6.0_41、GNU Make 3.81、gcc 4.6.3、Python 2.7.3。
+- 兩個關鍵坑：
+  1. GB 的 host 工具以 `-m32` 編譯，需要 32 位**開發標頭**
+     `libc6-dev-i386`（缺了報 `bits/predefs.h: No such file`）；
+     32 位運行庫（`libc6-i386` 等）只夠 prebuilt 工具鏈跑，不夠編。
+  2. host 編譯器墊片（不改 AOSP 源码）：`/usr/local/bin/g++` wrapper
+     追加 `-fpermissive -Wno-error`、`/usr/local/bin/gcc` 追加
+     `-Wno-error`。前者放行 gcc 4.6 對 4.4 年代 C++ 的新嚴格檢查
+     （首例 `frameworks/base/libs/utils/RefBase.cpp`）；後者中和
+     Ubuntu gcc 預定義 `_FORTIFY_SOURCE` 與 `-Werror` 模組
+     （如 obbtool）的衝突。目標編譯器是 prebuilt arm-eabi-4.4.3，
+     年代正確，不需墊片。
+
+### 產出（out/target/product/generic/）
+
+- `system/`：320 個檔案、共 64 MB（完整清單在 artifact 的
+  `system-tree.txt`）。
+- `system.img`：68,832,192 bytes（另存 artifact `gb-system-img`）。
+- 關鍵二進位（全數存在）：
+
+  | 檔案 | 大小（bytes） |
+  |---|---|
+  | root/init | 94,168 |
+  | system/bin/app_process | 5,660 |
+  | system/bin/dalvikvm | 5,508 |
+  | system/bin/servicemanager | 9,880 |
+  | system/lib/libbinder.so | 145,436 |
+  | system/lib/libandroid_runtime.so | 512,320 |
+  | system/lib/libandroid_servers.so | 61,552 |
+  | system/framework/services.jar | 634,031 |
+  | system/framework/framework.jar | 2,965,444 |
+  | system.img | 68,832,192 |
+
+### 迭代史（六輪，每輪一類問題）
+
+1. `ubuntu:10.04` 映像 manifest schema 1 被 Docker 拒收 → 換 12.04。
+2. apt 整批被 multiarch 衝突拖垮 → 分組安裝。
+3. host 工具 `-m32` 缺 32 位標頭 → 補 `libc6-dev-i386`。
+4. gcc 4.6 嚴格度（RefBase）→ g++ wrapper `-fpermissive`。
+5. `_FORTIFY_SOURCE` 重定義＋`-Werror` → wrapper `-Wno-error`。
+6. 全綠。
 
 ## 目錄
 
