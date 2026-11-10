@@ -4,7 +4,7 @@
 cd /aosp || exit 1
 export HOME=/home/builder
 export LC_ALL=C
-export JAVA_HOME=/usr/lib/jvm/java-6-openjdk
+export JAVA_HOME="$(ls -d /usr/lib/jvm/java-6-openjdk* 2>/dev/null | head -1)"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 set -x

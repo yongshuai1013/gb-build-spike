@@ -10,5 +10,5 @@ docker run --rm \
   -v "$PWD/report:/report" \
   -e HOST_UID="$(id -u)" \
   -e HOST_GID="$(id -g)" \
-  ubuntu:10.04 \
+  ubuntu:12.04 \
   bash /scripts/in-container.sh

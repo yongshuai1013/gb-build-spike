@@ -10,7 +10,10 @@ mkdir -p aosp
 cd aosp
 
 if [ ! -d .repo ]; then
-  repo init -u https://android.googlesource.com/platform/manifest \
+  # --depth=1: shallow checkouts. The full-history tree is ~33 GB, far
+  # over the 10 GB actions/cache limit; shallow lands at a few GB.
+  repo init --depth=1 \
+            -u https://android.googlesource.com/platform/manifest \
             -b android-2.3.7_r1
 fi
 
