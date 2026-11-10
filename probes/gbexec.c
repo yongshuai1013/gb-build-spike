@@ -109,23 +109,30 @@ static int gb_load(const char *path, Elf32_Addr dyn_bias,
 
         fsz_end = bias + ph->p_vaddr + ph->p_filesz;
         msz_end = bias + ph->p_vaddr + ph->p_memsz;
-        /* File-backed part (rounded out to whole pages). */
-        p = mmap((void *) va,
-                 ((fsz_end + 0xfffu) & ~0xfffu) - va,
-                 prot, MAP_PRIVATE | MAP_FIXED, fd, off);
-        if (p == MAP_FAILED) { close(fd); return -1; }
-        /* Zero the tail of the last file page beyond filesz, then any
-         * whole anonymous pages up to memsz. */
-        if (ph->p_memsz > ph->p_filesz) {
-            Elf32_Addr tail_from = fsz_end;
-            Elf32_Addr tail_page_end = (fsz_end + 0xfffu) & ~0xfffu;
-            if (tail_page_end > msz_end) tail_page_end = msz_end;
-            memset((void *) tail_from, 0, tail_page_end - tail_from);
-            if (msz_end > ((fsz_end + 0xfffu) & ~0xfffu)) {
-                Elf32_Addr anon = (fsz_end + 0xfffu) & ~0xfffu;
-                p = mmap((void *) anon, msz_end - anon, prot,
-                         MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+        /* File-backed part (rounded out to whole pages). A segment
+         * with a zero page-rounded length (the GB linker ships a
+         * PT_LOAD with filesz 0) must be skipped: mmap with length 0
+         * fails EINVAL (gate run 42765297042, qemu strace). */
+        {
+            Elf32_Addr fsz_page_end = (fsz_end + 0xfffu) & ~0xfffu;
+            if (fsz_page_end > va) {
+                p = mmap((void *) va, fsz_page_end - va,
+                         prot, MAP_PRIVATE | MAP_FIXED, fd, off);
                 if (p == MAP_FAILED) { close(fd); return -1; }
+            }
+            /* Zero the tail of the last file page beyond filesz,
+             * then any whole anonymous pages up to memsz. */
+            if (msz_end > fsz_end) {
+                Elf32_Addr tail_end = fsz_page_end;
+                if (tail_end > msz_end) tail_end = msz_end;
+                if (tail_end > fsz_end)
+                    memset((void *) fsz_end, 0, tail_end - fsz_end);
+                if (msz_end > fsz_page_end) {
+                    p = mmap((void *) fsz_page_end, msz_end - fsz_page_end,
+                             prot, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS,
+                             -1, 0);
+                    if (p == MAP_FAILED) { close(fd); return -1; }
+                }
             }
         }
         (void) mp;

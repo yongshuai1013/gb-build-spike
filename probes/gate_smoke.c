@@ -178,8 +178,12 @@ int main(int argc, char **argv)
     printf("SMOKE counters pre=%u handled=%u\n",
            __gb_gate_pre_calls, __gb_gate_handled);
     fflush(stdout);
+    /* handled counts this process's own special handlings: the
+     * /dev/binder dummy open and the BINDER_VERSION fake (>= 2).
+     * Handlings inside forked children (e.g. the execve rewrite)
+     * increment their own copies and cannot propagate back. */
     report("gate_counters", __gb_gate_pre_calls > 20 &&
-           __gb_gate_handled >= 3, 1);
+           __gb_gate_handled >= 2, 1);
 
     printf("SMOKE DONE core_fails=%d\n", core_fails);
     fflush(stdout);
