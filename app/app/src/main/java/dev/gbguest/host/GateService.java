@@ -9,9 +9,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
-import android.net.LocalSocketAddress;
 import android.os.Build;
 import android.os.IBinder;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructSockaddrUn;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -126,11 +128,17 @@ public class GateService extends Service {
 
     private void startGateServer(Context ctx, File sockFile) {
         try {
-            LocalSocketAddress addr = new LocalSocketAddress(
-                    sockFile.getAbsolutePath(),
-                    LocalSocketAddress.Namespace.FILESYSTEM);
-            LocalServerSocket server = new LocalServerSocket();
-            server.bind(addr);
+            // LocalServerSocket(String) only opens the ABSTRACT
+            // namespace; the guest connects to a real filesystem path
+            // ($GBROOT/dev/socket/gate), so bind a filesystem
+            // sockaddr_un via android.system.Os (public since API 26)
+            // and wrap the listening fd in a LocalServerSocket.
+            java.io.FileDescriptor fd = Os.socket(
+                    OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0);
+            Os.bind(fd, new StructSockaddrUn(
+                    sockFile.getAbsolutePath()));
+            Os.listen(fd, 50);
+            LocalServerSocket server = new LocalServerSocket(fd);
             gateSocket = server;
             HostLog.log(ctx, "gate socket listening at "
                     + sockFile.getAbsolutePath());
@@ -148,7 +156,7 @@ public class GateService extends Service {
                 }
             }, "gb-gate-accept");
             acceptThread.start();
-        } catch (IOException e) {
+        } catch (Exception e) {
             HostLog.log(ctx, "gate socket bind failed: " + e);
             writeStatus(ctx, "gate socket bind failed: " + e);
         }
