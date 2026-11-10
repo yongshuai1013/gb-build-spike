@@ -74,7 +74,12 @@ fi
 
 # ---------------- Phase 3: boot ----------------
 export SDL_VIDEODRIVER=dummy
+# Without an AVD the r12 emulator needs to be told where the system
+# directory is (round 1 died on exactly this). The AOSP dev flow uses
+# ANDROID_PRODUCT_OUT; -sysdir states the same location explicitly.
+export ANDROID_PRODUCT_OUT="$PWD/$PD"
 "$EMU" -kernel "$KERNEL" \
+       -sysdir "$PWD/$PD" \
        -ramdisk "$PD/ramdisk.img" \
        -system "$PD/system.img" \
        -data "$PD/userdata.img" \
