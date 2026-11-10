@@ -78,11 +78,15 @@ export SDL_VIDEODRIVER=dummy
 # directory is (round 1 died on exactly this). The AOSP dev flow uses
 # ANDROID_PRODUCT_OUT; -sysdir states the same location explicitly.
 export ANDROID_PRODUCT_OUT="$PWD/$PD"
-"$EMU" -kernel "$KERNEL" \
+mkdir -p "$HOME/.android"
+# Absolute image paths: with a sysdir set, the emulator resolves
+# relative image paths against it (round 2 doubled the prefix and
+# died on a nonexistent system.img).
+"$EMU" -kernel "$PWD/$KERNEL" \
        -sysdir "$PWD/$PD" \
-       -ramdisk "$PD/ramdisk.img" \
-       -system "$PD/system.img" \
-       -data "$PD/userdata.img" \
+       -ramdisk "$PWD/$PD/ramdisk.img" \
+       -system "$PWD/$PD/system.img" \
+       -data "$PWD/$PD/userdata.img" \
        -memory 512 \
        -no-window -no-audio -verbose \
        > "$LOGD/emulator.log" 2>&1 &
