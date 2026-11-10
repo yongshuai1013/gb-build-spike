@@ -129,3 +129,9 @@ App 內可見日誌、可匯出整包。不以 boot_completed 為 M1 線。
    地址空間語義使 svc 後簿記不安全）；線程 clone 本走手寫 clone.S。
 6. **AF_UNIX 路徑**：bind／connect 的 sun_path 納入路徑翻譯
    （本文處置表未明列；`/dev/socket/*` 通道成立的前提）。
+7. **exec_dynamic 煙霧結果（run 42768318713）**：qemu-user 下
+   gbexec 映射目標成功，但映射 linker 段（0xB0001000）回傳
+   異常值、linker 啟動後於 0x3e8 SIGSEGV；判為 qemu-user VA
+   模擬與 linker 啟動期待的交互問題（證據項、非門檻）。
+   gbexec→真 linker 全鏈路改於 M1 整合期以真實監督器路徑
+   驗證（客體 VA 為真位址、無 qemu 轉譯層）。

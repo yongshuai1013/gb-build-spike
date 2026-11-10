@@ -267,5 +267,42 @@ gbexec＋客體 linker（DESIGN 原案的「linker 以參數執行」經查
 
 ### CI 預檢結果
 
-（待 gate-build 首跑後填入：run 號、三項預檢逐項結果、artifact
-大小。）
+**gate-build run 42768318713（commit fd3a952）job success 全綠**
+（2026-11-10；判定以 job 狀態＋job log＋artifact 實下內容為準）。
+歷程：run 42760015743（補丁檔名 .arm 後綴誤解）、42761838414
+（make／抽驗／回歸全過、死於 rootfs 組裝套娃）、42765297042
+（build／rootfs 全過、煙霧兩項校準問題）三輪修復後第四輪全綠。
+
+三項預檢逐項：
+
+- (a) 反組譯抽驗：**通過**。產出 libc.so（symbols 版）抽樣樁
+  write/getpid/open 等皆含 `bl __gb_gate_pre`／`bl __gb_gate_post`
+  呼叫、標籤 10 為原版 svc 序列（gate 關閉走原路）；摘錄在
+  gb-gate-report 的 disasm.txt。
+- (b) 開機回歸：**通過**。改造樹（GBROOT 未設＝透明）在 era
+  emulator 四里程碑 M1–M4 全 YES（init／servicemanager+zygote／
+  system_server／sys.boot_completed=1），與未改造基線一致。
+- (c) gate 煙霧：**核心項全過**。qemu-user 以 GBROOT 啟用跑
+  gate_smoke：gate_mode_on、getpid 虛擬（4242）、getuid=0、
+  寫 /data 落 $GBROOT/data/gate-smoke.txt（宿主側實證 16 B）、
+  寫 /dev/console 落 $GBROOT/dev/console（19 B）、fork 子 vpid
+  連號、binder VERSION=7 與 WRITE_READ 停泊、計數器
+  （pre=51/handled≥1）全 OK；exec_static（execve 路徑翻譯→
+  靜態 helper）OK。
+  - 僅證據項 exec_dynamic（gbexec→真 GB linker→動態 helper）
+    仍 FAIL（不計 gate 成敗）：strace 顯示 gbexec 已正確映射
+    目標（0x8000/0x9000），但在 qemu-user 下映射 linker 段
+    （0xB0001000）回傳異常值、linker 啟動後於 0x3e8 處
+    SIGSEGV。判讀：疑 qemu-user 虛擬位址模擬與 GB linker
+    啟動期待之交互問題；gbexec 力學已以假 linker 本機驗證
+    （映射＋造棧＋跳轉＋退場碼正確）。此項留待 M1 整合期以
+    真實監督器路徑（客體 VA 為真位址）驗證，不擋 gate 管線。
+
+Artifacts（run 42768318713）：
+
+- `gb-gate-report`（48,490 B）：環境、disasm 摘錄、開機里程碑、
+  煙霧 stdout/strace/宿主核查、補丁清單。
+- `gb-rootfs`（37,757,830 B）：rootfs.tar.gz（組裝規則如上：
+  root/ 疊 system/、空 data/、dev/log 骨架、dev/console；
+  含 system/bin/{gbexec,gate_smoke,gate_helper,gate_helper_dyn}）
+  ＋檔案清單＋sha256。
