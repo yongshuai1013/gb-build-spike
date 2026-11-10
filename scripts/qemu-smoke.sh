@@ -89,9 +89,13 @@ cp -a "$ROOTFS" "$GB2"
 OUT="$PWD"
 (
   cd "$GB2"
-  GBROOT="$GB2" GBVPID=1 GBGATE=1 QEMU_STRACE=1 \
-    timeout 60 qemu-arm-static ./init \
-    > "$OUT/init-stdout.txt" 2> "$OUT/init-strace.txt"
+  # -strace -D: the trace goes to qemu's own log file. It must NOT
+  # go to stderr: the guest dup2()s its stdio onto fds 0/1/2 during
+  # startup (open_devnull_stdio), which hijacks a stderr trace
+  # mid-run and truncates coverage to the prologue.
+  GBROOT="$GB2" GBVPID=1 GBGATE=1 \
+    timeout 60 qemu-arm-static -strace -D "$OUT/init-strace.txt" ./init \
+    > "$OUT/init-stdout.txt" 2> "$OUT/init-stderr.txt"
   echo $? > "$OUT/init-rc.txt"
 )
 INIT_RC=$(cat init-rc.txt)
@@ -100,16 +104,39 @@ INIT_RC=$(cat init-rc.txt)
   echo "== guest init window =="
   echo "init exit code after 60s window: $INIT_RC (124 = still alive, killed by timeout)"
   [ "$INIT_RC" = "124" ] || ok2=0
-  echo "== guest boot log (dev/console) =="
-  if grep -q "reading config file" "$GB2/dev/console"; then
-    echo "YES  console contains init's 'reading config file'"
+  echo "== trace coverage (must be the full window, not just the prologue) =="
+  TLINES=$(wc -l < init-strace.txt)
+  echo "trace lines: $TLINES"
+  [ "$TLINES" -ge 1000 ] || ok2=0
+  if grep -aq "poll(" init-strace.txt; then
+    echo "YES  trace reaches a poll() main loop"
   else
-    echo "NO   console lacks init's boot log line"
+    echo "NO   trace never reaches poll()"
+    ok2=0
+  fi
+  echo "== rc execution fingerprint =="
+  # 'on init' runs: symlink /system/etc /etc - issued through the
+  # gate's symlinkat rewrite; the link itself is the receipt.
+  if [ -L "$GB2/etc" ]; then
+    echo "YES  \$GBROOT/etc symlink created by rc processing"
+  else
+    echo "NO   \$GBROOT/etc symlink missing - rc triggers did not run"
+    ok2=0
+  fi
+  echo "== guest boot log (dev/console) =="
+  # GB init logs at level <=3 by default (loglevel 3), so INFO lines
+  # such as 'reading config file' never land in the log by design;
+  # the 'init:'-prefixed lines that do land prove the __kmsg__ ->
+  # console redirect works.
+  if grep -q "init:" "$GB2/dev/console"; then
+    echo "YES  console contains init's own log lines"
+  else
+    echo "NO   console has no init log lines"
     ok2=0
   fi
   echo "== seccomp shield: blocked syscalls issued by the guest =="
   BLOCKED_RE='(^|[^a-zA-Z0-9_])(mount|umount|umount2|reboot|mknod|chmod|chown32|lchown32|chown|lchown|rmdir|symlink|link|accept|ftruncate|settimeofday|sethostname|setdomainname|setuid32|setgid32|setreuid32|setregid32|setresgid32|setgroups32|setuid|setgid|setgroups|pause|sigsuspend|sigprocmask|sigpending|ioprio_set|ioprio_get)\('
-  if grep -E "$BLOCKED_RE" init-strace.txt > init-blocked.txt; then
+  if grep -aE "$BLOCKED_RE" init-strace.txt > init-blocked.txt; then
     echo "NO   blocked syscalls were issued (first 10):"
     head -10 init-blocked.txt
     ok2=0
@@ -117,9 +144,11 @@ INIT_RC=$(cat init-rc.txt)
     echo "YES  no blocked syscall issued in the window"
   fi
   echo "== shield rewrites observed (informational) =="
-  echo "fchmodat calls: $(grep -cE 'fchmodat\(' init-strace.txt)"
-  echo "fchownat calls: $(grep -cE 'fchownat\(' init-strace.txt)"
-  echo "rt_sigsuspend calls: $(grep -cE 'rt_sigsuspend\(' init-strace.txt)"
+  echo "fchmodat calls: $(grep -acE 'fchmodat\(' init-strace.txt)"
+  echo "fchownat calls: $(grep -acE 'fchownat\(' init-strace.txt)"
+  echo "symlinkat calls: $(grep -acE 'symlinkat\(' init-strace.txt)"
+  echo "ftruncate64 calls: $(grep -acE 'ftruncate64\(' init-strace.txt)"
+  echo "rt_sigsuspend calls: $(grep -acE 'rt_sigsuspend\(' init-strace.txt)"
   echo
   echo "init checks ok=$ok2 init_rc=$INIT_RC"
 } > init-host-checks.txt 2>&1

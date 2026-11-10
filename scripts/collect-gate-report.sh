@@ -13,6 +13,7 @@ cp smoke-stdout.txt gate-report/ 2>/dev/null || true
 cp smoke-strace.txt gate-report/ 2>/dev/null || true
 cp smoke-host-checks.txt gate-report/ 2>/dev/null || true
 cp init-stdout.txt gate-report/ 2>/dev/null || true
+cp init-stderr.txt gate-report/ 2>/dev/null || true
 cp init-strace.txt gate-report/ 2>/dev/null || true
 cp init-host-checks.txt gate-report/ 2>/dev/null || true
 cp init-blocked.txt gate-report/ 2>/dev/null || true

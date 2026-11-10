@@ -166,10 +166,12 @@ setgid／setgroups／setuid（servicemanager 帶 user system，
 留待後續里程碑按需再加。
 
 驗證：分發器新邏輯以 ARM 交叉編譯＋qemu-user 單元 harness 逐項
-驗畢（18 項：假辦／改寫後參數與 nr 槽／mknod 建檔與 EEXIST／
+驗畢（19 項：假辦／改寫後參數與 nr 槽／mknod 建檔與 EEXIST／
 __kmsg__ 重定向／pause 被信號喚醒回 -EINTR）；CI 另在
 qemu-smoke.sh phase 2 以真 init 跑 60 秒窗口斷言：程序仍存活、
-dev/console 含開機日誌、strace 中無任何被禁 syscall 被發出。
+trace 覆蓋全程（qemu -D 獨立日誌，免被客體 dup2 引流）且無任何
+被禁 syscall 被發出、rc 執行指紋（on-init 的 /etc 符號連結）
+存在、dev/console 含 init 自己的日誌行。
 
 ## system-core
 
