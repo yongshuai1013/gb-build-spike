@@ -155,8 +155,16 @@ artifact `gb-boot-report`（id 13736410167）。里程碑（adb 輪詢時間軸�
 - 主畫面（MainActivity）：狀態行、啟動／停止鈕、即時日誌區、匯出鈕。
 - GateService（前台 Service）：管 `gbroot/init` 行程生死（啟動、監看
   退出、停止時 destroy＋以 gbroot 路徑 best-effort 清整樹）；在
-  `gbroot/dev/socket/gate` 開 filesystem LocalServerSocket，M1 協議：
+  `gbroot/dev/socket/gate` 開 filesystem unix socket，M1 協議：
   行 `PING` 回 `PONG`，其餘行作 `CONSOLE` 收錄進 `filesDir/logs/gate.log`。
+  實作註記：公開 Java SDK 開不了 filesystem unix server socket
+  （`LocalServerSocket(String)` 只有 abstract namespace、
+  `StructSockaddrUn`/`Os.bind` 是 @hide，CI run 42758265048／
+  42758537220 兩次編譯錯誤實證），故 listener 改為一個小 POSIX C
+  helper（`app/gate-helper/gated.c`，CI 以 NDK 編 arm64-v8a＋
+  armeabi-v7a、隨 assets 抽出 exec，GateService 管生死；本機已以
+  host gcc 驗證 PING→PONG 與 CONSOLE 落檔）。對客體的可觀察介面
+  （路徑、協議、gate.log）與設計一致。
   **M1 實際分工**：客體主通道是檔案（`dev/console`、`dev/log/*`），
   socket 是已就位的接口；binder 傳輸在 M1 未實現（DESIGN 定案），
   不得宣稱可用。

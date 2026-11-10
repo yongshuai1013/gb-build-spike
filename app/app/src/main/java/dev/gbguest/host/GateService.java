@@ -7,20 +7,13 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.net.LocalServerSocket;
-import android.net.LocalSocket;
 import android.os.Build;
 import android.os.IBinder;
-import android.system.Os;
-import android.system.OsConstants;
-import android.system.StructSockaddrUn;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
 /** Foreground service that owns the guest init process tree and the
@@ -28,9 +21,15 @@ import java.nio.charset.StandardCharsets;
  *  - Starts/monitors/stops gbroot/init (ProcessBuilder, env GBROOT,
  *    GBVPID=1, GBGATE=1, cwd=gbroot, stdout+stderr appended to
  *    filesDir/logs/launcher.log).
- *  - Serves $GBROOT/dev/socket/gate as a filesystem LocalServerSocket.
- *    M1 protocol: a line "PING" gets "PONG"; any other line is filed
- *    as a CONSOLE line into filesDir/logs/gate.log. In M1 the file
+ *  - Serves $GBROOT/dev/socket/gate as a real filesystem unix socket.
+ *    The public Java SDK cannot create one (LocalServerSocket(String)
+ *    is abstract-namespace only; StructSockaddrUn/Os.bind are @hide,
+ *    proven by CI compile failures on runs 42758265048/42758537220),
+ *    so the listener is a tiny POSIX helper (app/gate-helper/gated.c,
+ *    NDK-built in CI, bundled as assets/gate/<abi>/gated) that this
+ *    service extracts, execs, monitors and kills. M1 protocol: a line
+ *    "PING" gets "PONG"; any other line is filed as a CONSOLE line
+ *    into filesDir/logs/gate.log by the helper. In M1 the file
  *    channels (dev/console, dev/log/*) are the primary path; this
  *    socket is the in-place interface for later milestones. */
 public class GateService extends Service {
@@ -43,8 +42,7 @@ public class GateService extends Service {
 
     private volatile boolean running;
     private volatile Process initProcess;
-    private volatile LocalServerSocket gateSocket;
-    private Thread acceptThread;
+    private volatile Process gateProcess;
     private Thread monitorThread;
 
     @Override public IBinder onBind(Intent intent) { return null; }
@@ -128,73 +126,57 @@ public class GateService extends Service {
 
     private void startGateServer(Context ctx, File sockFile) {
         try {
-            // LocalServerSocket(String) only opens the ABSTRACT
-            // namespace; the guest connects to a real filesystem path
-            // ($GBROOT/dev/socket/gate), so bind a filesystem
-            // sockaddr_un via android.system.Os (public since API 26)
-            // and wrap the listening fd in a LocalServerSocket.
-            java.io.FileDescriptor fd = Os.socket(
-                    OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0);
-            Os.bind(fd, new StructSockaddrUn(
-                    sockFile.getAbsolutePath()));
-            Os.listen(fd, 50);
-            LocalServerSocket server = new LocalServerSocket(fd);
-            gateSocket = server;
-            HostLog.log(ctx, "gate socket listening at "
-                    + sockFile.getAbsolutePath());
-            acceptThread = new Thread(() -> {
-                while (running && gateSocket != null) {
-                    try {
-                        LocalSocket client = gateSocket.accept();
-                        new Thread(() -> handleGateClient(ctx, client),
-                                "gb-gate-client").start();
-                    } catch (IOException e) {
-                        if (running) HostLog.log(ctx,
-                                "gate accept failed: " + e);
-                        return;
-                    }
-                }
-            }, "gb-gate-accept");
-            acceptThread.start();
-        } catch (Exception e) {
-            HostLog.log(ctx, "gate socket bind failed: " + e);
-            writeStatus(ctx, "gate socket bind failed: " + e);
-        }
-    }
-
-    private void handleGateClient(Context ctx, LocalSocket client) {
-        try {
-            BufferedReader in = new BufferedReader(new InputStreamReader(
-                    client.getInputStream(), StandardCharsets.UTF_8));
-            OutputStream out = client.getOutputStream();
-            String line;
-            while ((line = in.readLine()) != null) {
-                if ("PING".equals(line.trim())) {
-                    out.write("PONG\n".getBytes(StandardCharsets.UTF_8));
-                    out.flush();
-                } else {
-                    // Any other line is filed as a CONSOLE line.
-                    appendGateLog(ctx, "CONSOLE " + line);
-                }
-            }
-        } catch (IOException e) {
-            HostLog.log(ctx, "gate client error: " + e);
-        } finally {
-            try { client.close(); } catch (IOException ignored) {}
-        }
-    }
-
-    private void appendGateLog(Context ctx, String line) {
-        try {
-            File dir = new File(ctx.getFilesDir(), "logs");
+            File gated = extractGateHelper(ctx);
+            File logsDir = new File(ctx.getFilesDir(), "logs");
             //noinspection ResultOfMethodCallIgnored
-            dir.mkdirs();
-            FileOutputStream fos =
-                    new FileOutputStream(new File(dir, "gate.log"), true);
+            logsDir.mkdirs();
+            File gateLog = new File(logsDir, "gate.log");
+            ProcessBuilder pb = new ProcessBuilder(
+                    gated.getAbsolutePath(),
+                    sockFile.getAbsolutePath(),
+                    gateLog.getAbsolutePath());
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(
+                    new File(logsDir, "gate-helper.log")));
+            gateProcess = pb.start();
+            HostLog.log(ctx, "gated helper started for "
+                    + sockFile.getAbsolutePath());
+            new Thread(() -> {
+                int rc = -1;
+                try { rc = gateProcess.waitFor(); }
+                catch (InterruptedException ignored) {}
+                if (running) {
+                    HostLog.log(getApplicationContext(),
+                            "gated helper exited rc=" + rc);
+                    writeStatus(getApplicationContext(),
+                            "gate helper exited rc=" + rc);
+                }
+            }, "gb-gated-monitor").start();
+        } catch (Exception e) {
+            HostLog.log(ctx, "gate helper start failed: " + e);
+            writeStatus(ctx, "gate helper start failed: " + e);
+        }
+    }
+
+    /** Extracts assets/gate/<abi>/gated to filesDir/gate/gated. */
+    private File extractGateHelper(Context ctx) throws IOException {
+        String abi = Build.SUPPORTED_ABIS.length > 0
+                ? Build.SUPPORTED_ABIS[0] : "arm64-v8a";
+        File dir = new File(ctx.getFilesDir(), "gate");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        File out = new File(dir, "gated");
+        InputStream in = ctx.getAssets().open("gate/" + abi + "/gated");
+        try {
+            FileOutputStream fos = new FileOutputStream(out);
             try {
-                fos.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
             } finally { fos.close(); }
-        } catch (IOException ignored) {}
+        } finally { in.close(); }
+        out.setExecutable(true, false);
+        return out;
     }
 
     private synchronized void stopGuest(String why) {
@@ -203,10 +185,10 @@ public class GateService extends Service {
         Context ctx = getApplicationContext();
         HostLog.log(ctx, "stopping guest: " + why);
         writeStatus(ctx, "stopping: " + why);
-        // Close the gate socket first so the accept loop ends.
-        try { if (gateSocket != null) gateSocket.close(); }
-        catch (IOException ignored) {}
-        gateSocket = null;
+        // Kill the gate helper first so no new guest lines arrive.
+        Process gp = gateProcess;
+        gateProcess = null;
+        if (gp != null) gp.destroy();
         Process p = initProcess;
         initProcess = null;
         if (p != null) {
