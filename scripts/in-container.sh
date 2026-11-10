@@ -65,6 +65,20 @@ echo "apt groups: g1=$G1_RC g2=$G2_RC g3=$G3_RC" > /report/apt-groups.txt
 ln -sf /usr/lib/i386-linux-gnu/mesa/libGL.so.1 \
        /usr/lib/i386-linux-gnu/libGL.so 2>/dev/null || true
 
+# Host-compiler shim: the tree's C++ was written against gcc 4.4, but
+# precise ships gcc 4.6, which turns some then-legal code into errors
+# (first hit: frameworks/base/libs/utils/RefBase.cpp discarding const
+# qualifiers, which gcc itself notes is [-fpermissive]). The target
+# compiler is the prebuilt arm-eabi-4.4.3 and needs no shim; only the
+# host g++ gets a wrapper that appends -fpermissive.
+cat > /usr/local/bin/g++ <<'EOF'
+#!/bin/sh
+exec /usr/bin/g++ "$@" -fpermissive
+EOF
+chmod +x /usr/local/bin/g++
+echo "g++ wrapper installed: $(command -v g++) -> /usr/bin/g++ + -fpermissive" \
+  >> /report/environment.txt
+
 {
   echo "== container environment =="
   cat /etc/lsb-release 2>/dev/null
