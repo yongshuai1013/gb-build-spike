@@ -140,3 +140,72 @@ artifact `gb-boot-report`（id 13736410167）。里程碑（adb 輪詢時間軸�
 3. run 42754645850：全過（見上）。另：r12 的 `tools/emulator` 只是啟動器，
    本體 `tools/emulator-arm` 只依賴 glibc 家族，SDL/X11 運行庫非必要
    （workflow 內仍 best-effort 裝著備用）。
+
+## M1-B：宿主 App＋APK 構建管線（工作線 B）
+
+`app/` 是獨立寫的簡潔殼（不複製 PaxVM 源码），把自編 GB 客體在真機
+（moto g51、未 root）由 App 拉起。設計見 `DESIGN-M1.md` 的「宿主 App」
+與「構建與交付管線」兩節。
+
+- 套件：applicationId `dev.gbguest.host`、versionCode 1、
+  versionName `0.1.0-m1b`、minSdk 26、**targetSdk 28**（Android 只對
+  target ≤ 28 的 App 允許從私有目錄 exec，這是 rootfs 直接放
+  `filesDir/gbroot` 的政策前提，代碼與 build.gradle 皆有註解，勿調高）、
+  compileSdk 34。
+- 主畫面（MainActivity）：狀態行、啟動／停止鈕、即時日誌區、匯出鈕。
+- GateService（前台 Service）：管 `gbroot/init` 行程生死（啟動、監看
+  退出、停止時 destroy＋以 gbroot 路徑 best-effort 清整樹）；在
+  `gbroot/dev/socket/gate` 開 filesystem LocalServerSocket，M1 協議：
+  行 `PING` 回 `PONG`，其餘行作 `CONSOLE` 收錄進 `filesDir/logs/gate.log`。
+  **M1 實際分工**：客體主通道是檔案（`dev/console`、`dev/log/*`），
+  socket 是已就位的接口；binder 傳輸在 M1 未實現（DESIGN 定案），
+  不得宣稱可用。
+- 啟動流程：首啟把 assets 的 `rootfs.tar.gz` 解壓到 `filesDir/gbroot`
+  （以 asset 的 SHA-256 作版本戳記存 `gbroot/.asset-sha256`，戳記
+  不同才重解——CI 換入真 rootfs artifact 後自動觸發重解）；以
+  ProcessBuilder 拉起 `gbroot/init`，env `GBROOT=<gbroot 絕對路徑>`、
+  `GBVPID=1`、`GBGATE=1`，cwd=gbroot，stdout/stderr 合流 append 到
+  `filesDir/logs/launcher.log`。
+- 日誌區每秒 tail：`gbroot/dev/console`、`gbroot/dev/log/*`、
+  `filesDir/logs/launcher.log`、`gate.log`、`host.log`。宿主 log
+  （`filesDir/logs/host.log`）另同步鏡像一份到 Download 的
+  `gbguest-host.log`（檔案管理員可見，App 死掉也還在）。
+
+### 操作說明（真機）
+
+1. 從 CI artifact `gb-host-apk` 下載 APK 安裝（與先前版本同簽名，
+   可覆蓋裝）。
+2. 開 App，允許儲存權限（Download 鏡像／匯出用）。
+3. 按 **Start**：狀態行應依序出現 extracted → running；日誌區應看到
+   客體 init 的輸出（佔位版會印 `[placeholder-init] booting` 與每
+   5 秒一次的 heartbeat；真 rootfs 換入後是 GB init／init.rc 的日誌）。
+4. 按 **Stop**：狀態行變 stopped，客體行程樹應被清掉。
+5. 按 **Export logs**：把日誌（launcher/gate/host/status＋
+   `gbroot` 內 `dev/console`、`dev/log/*`）打包成
+   `Download/gbguest-logs-<時間>.zip` 並跳分享意圖，回傳時傳這個
+   zip 即可。
+
+### 構建管線（.github/workflows/app-build.yml）
+
+checkout → 嘗試下載最近一次成功 gate-build（工作線 A）的
+`gb-rootfs` artifact 替換 assets（**有真 artifact 優先**；拿不到
+則用倉內佔位 `app/app/placeholder-rootfs/` 打成的 tar.gz，管線照樣
+全綠）→ JDK 17＋Gradle 8.7 打 release → secrets 金鑰簽名 →
+apksigner 驗簽＋指紋斷言＋aapt badging 檢查 → 上傳 artifact
+`gb-host-apk`。
+
+- 簽名：專案長期 PKCS12（alias `gbkey`），備份在倉外
+  `~/workspace/gb-build-spike-keystore-backup/`（權限 600），
+  **金鑰與密碼絕不入倉**。憑證 SHA-256 指紋：
+  `49:91:7D:B4:A0:DE:56:DD:20:A5:2B:DC:6C:4C:D5:57:B3:A0:D4:2D:CE:20:A5:43:00:38:E7:35:09:B5:05:A0`，
+  效期至 2076。
+- Secrets 設置記錄（只記名稱，2026-11-10 已設並以 API 名單核實
+  存在）：`GBKEY_P12_B64`（p12 的 base64）、`GBKEY_PW`（密碼）。
+
+### 佔位 rootfs 說明
+
+工作線 A 的真 rootfs 就緒前，assets 內是佔位版：一個假 `init`
+（shell 腳本，印字＋寫 `dev/console`、`dev/log/main`＋每 5 秒
+heartbeat，`GBROOT_ONCE=1` 時跑一拍即退）＋最小骨架，讓殼的
+解壓／啟動／日誌／匯出全鏈可先驗證。換上真 artifact 後佔位即被
+取代，不需改 App 代碼（戳記是 asset 內容雜湊）。

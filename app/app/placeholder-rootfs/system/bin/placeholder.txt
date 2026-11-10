@@ -1,0 +1,2 @@
+Placeholder system tree. Replaced by the real GB system/ from the
+gb-rootfs artifact (work line A) when one is available in CI.

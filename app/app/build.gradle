@@ -1,0 +1,62 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'dev.gbguest.host'
+    // CI runners (ubuntu-22.04 image) ship Android SDK platform 34 +
+    // build-tools 34.0.0; the app-build workflow installs them
+    // explicitly via sdkmanager as well.
+    compileSdk 34
+    buildToolsVersion '34.0.0'
+
+    defaultConfig {
+        applicationId 'dev.gbguest.host'
+        minSdk 26
+        // targetSdk 28 is a hard requirement, not a default: Android
+        // only allows executing binaries from the app private data
+        // directory (filesDir) for apps targeting API <= 28 (the
+        // Termux policy). The GB guest rootfs lives in filesDir/gbroot
+        // and gbroot/init is exec'd from there, so do NOT raise this.
+        targetSdk 28
+        versionCode 1
+        versionName '0.1.0-m1b'
+    }
+
+    signingConfigs {
+        release {
+            // Injected by CI from GitHub Secrets (see app-build.yml):
+            // GBKEY_STORE_FILE = decoded PKCS12 path, GBKEY_PW = its
+            // password, alias is fixed 'gbkey'. Key password == store
+            // password for this PKCS12. Absent env -> unsigned build
+            // (local smoke builds only); CI always provides it.
+            def storePath = System.getenv('GBKEY_STORE_FILE')
+            if (storePath) {
+                storeFile file(storePath)
+                storePassword System.getenv('GBKEY_PW')
+                keyAlias 'gbkey'
+                keyPassword System.getenv('GBKEY_PW')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (System.getenv('GBKEY_STORE_FILE')) {
+                signingConfig signingConfigs.release
+            }
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Only for androidx.core.content.FileProvider (zip export share).
+    implementation 'androidx.core:core:1.13.1'
+}

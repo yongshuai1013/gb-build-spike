@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Export zips are written to the public Download directory. -->
+    <external-path name="downloads" path="Download/" />
+    <files-path name="files" path="." />
+</paths>

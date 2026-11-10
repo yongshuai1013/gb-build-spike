@@ -1,0 +1,115 @@
+name: gb-host-app-build
+
+# Work line B: host app + APK pipeline (DESIGN-M1 "build & delivery").
+# Rootfs source priority:
+#   1. The newest successful gate-build run's `gb-rootfs` artifact
+#      (work line A) replaces the bundled placeholder asset.
+#   2. Otherwise the in-repo placeholder rootfs.tar.gz is used as-is,
+#      so this workflow is green before line A lands.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/app-build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Try to fetch real gb-rootfs artifact (line A)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          mkdir -p /tmp/gb-rootfs
+          RUN_ID="$(gh api "repos/${{ github.repository }}/actions/workflows/gate-build.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id // empty' 2>/dev/null || true)"
+          if [ -n "$RUN_ID" ]; then
+            echo "gate-build run: $RUN_ID"
+            if gh run download "$RUN_ID" --name gb-rootfs --dir /tmp/gb-rootfs 2>/dev/null; then
+              FOUND="$(find /tmp/gb-rootfs -name 'rootfs.tar.gz' | head -1)"
+              if [ -n "$FOUND" ]; then
+                cp "$FOUND" app/app/src/main/assets/rootfs.tar.gz
+                echo "ROOTFS_SOURCE=real artifact from gate-build run $RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+          fi
+          if ! grep -q ROOTFS_SOURCE "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
+            echo "ROOTFS_SOURCE=in-repo placeholder" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tar -tzf app/app/src/main/assets/rootfs.tar.gz >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Placeholder/shell-chain smoke check on the asset
+        run: |
+          set -eu
+          tar -tzf app/app/src/main/assets/rootfs.tar.gz | grep -qx './init' \
+            || tar -tzf app/app/src/main/assets/rootfs.tar.gz | grep -qx 'init'
+          ls -l app/app/src/main/assets/rootfs.tar.gz
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Install Android SDK platform 34 + build-tools
+        run: |
+          set -eu
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager | sort | tail -1)"
+          echo "sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Decode signing key from secrets
+        env:
+          GBKEY_P12_B64: ${{ secrets.GBKEY_P12_B64 }}
+          GBKEY_PW: ${{ secrets.GBKEY_PW }}
+        run: |
+          set -eu
+          test -n "$GBKEY_P12_B64" && test -n "$GBKEY_PW"
+          echo "$GBKEY_P12_B64" | base64 -d > "$RUNNER_TEMP/gbkey.p12"
+          ls -l "$RUNNER_TEMP/gbkey.p12"
+          echo "GBKEY_STORE_FILE=$RUNNER_TEMP/gbkey.p12" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        working-directory: app
+        env:
+          GBKEY_PW: ${{ secrets.GBKEY_PW }}
+        run: gradle :app:assembleRelease --stacktrace --console=plain
+
+      - name: Verify signature + badging
+        run: |
+          set -eu
+          APK="$(find app/app/build/outputs/apk/release -name '*.apk' | head -1)"
+          echo "APK=$APK"
+          ls -l "$APK"
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          "$BT/apksigner" verify --verbose --print-certs "$APK" | tee /tmp/certs.txt
+          # Project long-term key, SHA-256 (see README M1-B section).
+          grep -qi '49:91:7D:B4:A0:DE:56:DD:20:A5:2B:DC:6C:4C:D5:57:B3:A0:D4:2D:CE:20:A5:43:00:38:E7:35:09:B5:05:A0' /tmp/certs.txt
+          echo "signature fingerprint OK"
+          "$BT/aapt" dump badging "$APK" | tee /tmp/badging.txt
+          grep -q "package: name='dev.gbguest.host'" /tmp/badging.txt
+          grep -q "targetSdkVersion:'28'" /tmp/badging.txt
+          echo "badging OK"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb-host-apk
+          path: app/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

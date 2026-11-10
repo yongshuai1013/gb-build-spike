@@ -1,0 +1,22 @@
+#!/system/bin/sh
+# PLACEHOLDER guest init for work line B shell-chain validation ONLY.
+# The real GB init (work line A rootfs artifact) replaces this whole
+# tarball. This script proves the host chain end to end:
+# extract -> exec gbroot/init -> console/log files -> export.
+# Env from host launcher: GBROOT=<abs gbroot>, GBVPID=1, GBGATE=1.
+echo "[placeholder-init] booting, GBROOT=$GBROOT GBVPID=$GBVPID GBGATE=$GBGATE"
+echo "[placeholder-init] booting" >> "$GBROOT/dev/console"
+echo "[placeholder-init] log/main alive" >> "$GBROOT/dev/log/main"
+mkdir -p "$GBROOT/dev/log" "$GBROOT/dev/socket"
+n=0
+while true; do
+  n=$((n+1))
+  echo "[placeholder-init] heartbeat $n"
+  echo "[placeholder-init] heartbeat $n" >> "$GBROOT/dev/console"
+  # One-shot mode for CI/local smoke tests: exit after first beat.
+  if [ "$GBROOT_ONCE" = "1" ]; then
+    echo "[placeholder-init] one-shot done"
+    exit 0
+  fi
+  sleep 5
+done
