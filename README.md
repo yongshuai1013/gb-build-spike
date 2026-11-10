@@ -168,7 +168,10 @@ artifact `gb-boot-report`（id 13736410167）。里程碑（adb 輪詢時間軸�
   **M1 實際分工**：客體主通道是檔案（`dev/console`、`dev/log/*`），
   socket 是已就位的接口；binder 傳輸在 M1 未實現（DESIGN 定案），
   不得宣稱可用。
-- 啟動流程：首啟把 assets 的 `rootfs.tar.gz` 解壓到 `filesDir/gbroot`
+- 啟動流程：首啟把 assets 的 rootfs 解壓到 `filesDir/gbroot`
+  （asset 檔名用 `rootfs.pkg`：內容就是 rootfs.tar.gz 的位元組，
+  但 AGP 打包會把 `.gz` asset 解壓改名成 `.tar`——run 42759717958
+  驗包實證——故用中性檔名讓它原樣入包，App 自行 GZIP 解）
   （以 asset 的 SHA-256 作版本戳記存 `gbroot/.asset-sha256`，戳記
   不同才重解——CI 換入真 rootfs artifact 後自動觸發重解）；以
   ProcessBuilder 拉起 `gbroot/init`，env `GBROOT=<gbroot 絕對路徑>`、

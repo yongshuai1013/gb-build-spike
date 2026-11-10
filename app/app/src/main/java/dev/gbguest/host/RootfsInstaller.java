@@ -19,7 +19,13 @@ import java.util.zip.GZIPInputStream;
  *  a content hash is the stamp, so swapping in the real gb-rootfs
  *  artifact in CI automatically triggers a fresh extract). */
 public final class RootfsInstaller {
-    public static final String ASSET_NAME = "rootfs.tar.gz";
+    // The bundled asset is a tar.gz byte-for-byte, but it is NOT
+    // named .tar.gz: AGP gunzips and renames *.gz assets while
+    // packaging (verified in the APK of run 42759717958, where the
+    // asset landed as assets/rootfs.tar), which would make the
+    // runtime open() miss. The neutral .pkg name ships verbatim;
+    // this class applies GZIPInputStream itself.
+    public static final String ASSET_NAME = "rootfs.pkg";
 
     private RootfsInstaller() {}
 

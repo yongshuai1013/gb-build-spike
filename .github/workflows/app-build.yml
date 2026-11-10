@@ -35,7 +35,7 @@ jobs:
             if gh run download "$RUN_ID" --name gb-rootfs --dir /tmp/gb-rootfs 2>/dev/null; then
               FOUND="$(find /tmp/gb-rootfs -name 'rootfs.tar.gz' | head -1)"
               if [ -n "$FOUND" ]; then
-                cp "$FOUND" app/app/src/main/assets/rootfs.tar.gz
+                cp "$FOUND" app/app/src/main/assets/rootfs.pkg
                 echo "ROOTFS_SOURCE=real artifact from gate-build run $RUN_ID" >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
@@ -44,15 +44,15 @@ jobs:
             echo "ROOTFS_SOURCE=in-repo placeholder" >> "$GITHUB_STEP_SUMMARY"
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          tar -tzf app/app/src/main/assets/rootfs.tar.gz >> "$GITHUB_STEP_SUMMARY"
+          tar -tzf app/app/src/main/assets/rootfs.pkg >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Placeholder/shell-chain smoke check on the asset
         run: |
           set -eu
-          tar -tzf app/app/src/main/assets/rootfs.tar.gz | grep -qx './init' \
-            || tar -tzf app/app/src/main/assets/rootfs.tar.gz | grep -qx 'init'
-          ls -l app/app/src/main/assets/rootfs.tar.gz
+          tar -tzf app/app/src/main/assets/rootfs.pkg | grep -qx './init' \
+            || tar -tzf app/app/src/main/assets/rootfs.pkg | grep -qx 'init'
+          ls -l app/app/src/main/assets/rootfs.pkg
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
