@@ -49,6 +49,7 @@ manifest contains no external/pcre project at all (`repo sync`:
 "project external/pcre not found") — the Android fork of libselinux
 does not use pcre. Row removed; if a later link error names pcre
 symbols, this gets revisited with that evidence.
+| external/compiler-rt | libc depends on the libcompiler_rt-extras static library (make error, round 5) |
 | prebuilts/sdk | build/core/config.mk derives TARGET_AVAILABLE_SDK_VERSIONS from prebuilts/sdk/*/android.jar; without it every Java module's LOCAL_SDK_VERSION check fails at parse time (found round 4 via frameworks/native/opengl/tests) |
 | prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.7 | target userspace compiler named by build/core combo config |
 | prebuilts/gcc/linux-x86/arm/arm-eabi-4.7 | kernel toolchain the combo config references at parse time |
