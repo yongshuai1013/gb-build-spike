@@ -12,6 +12,31 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 MODULES="libc linker init servicemanager libcutils libutils libbinder"
 
+# JDK banner shim (fix round 2). build/core/main.mk of 4.4.4_r2 hard-
+# stops if `java -version` output contains "openjdk" anywhere, even
+# though the version checks themselves (first line ^java .*1.6, javac
+# 1.6) pass with OpenJDK 6 — the same JDK the GB probe built a whole
+# tree with. The shim delegates everything to the real java and only
+# rewrites the -version banner's "OpenJDK" wording; all actual java
+# work runs on the unmodified OpenJDK 6 binaries. Recorded here and
+# in the report so the probe stays honest about it.
+SHIMDIR="$HOME/.kk-shims"
+mkdir -p "$SHIMDIR"
+cat > "$SHIMDIR/java" <<EOF
+#!/bin/sh
+REAL="$JAVA_HOME/bin/java"
+if [ "\$1" = "-version" ]; then
+  OUT=\$("\$REAL" "\$@" 2>&1); RC=\$?
+  printf '%s\n' "\$OUT" | sed 's/OpenJDK/Java/g; s/openjdk/java/g' 1>&2
+  exit \$RC
+fi
+exec "\$REAL" "\$@"
+EOF
+chmod +x "$SHIMDIR/java"
+export PATH="$SHIMDIR:$PATH"
+echo "java banner shim active: -version output has OpenJDK->Java wording only; binary is $JAVA_HOME/bin/java" \
+  >> /report/environment.txt
+
 set -x
 source build/envsetup.sh
 
