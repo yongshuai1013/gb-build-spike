@@ -1,0 +1,46 @@
+diff --git a/libc/arch-arm/bionic/gb_gate.c b/libc/arch-arm/bionic/gb_gate.c
+index 13812f9..105e674 100644
+--- a/libc/arch-arm/bionic/gb_gate.c
++++ b/libc/arch-arm/bionic/gb_gate.c
+@@ -14,9 +14,11 @@
+  *     the host-true device nodes /dev/null, /dev/zero, /dev/urandom,
+  *     /dev/random); overlong results fail with ENAMETOOLONG.
+  *   - /dev/console and /dev/log/* therefore land on plain files inside
+- *     the rootfs; /dev/binder opens a dummy fd (/dev/null) whose
+- *     ioctls are faked (BINDER_VERSION, BINDER_WRITE_READ parks the
+- *     caller, everything else returns success).
++ *     the rootfs; /dev/binder likewise lands on a plain backing file
++ *     in the rootfs (0005: GB servicemanager mmaps 128 KiB on the fd,
++ *     which a /dev/null dummy cannot serve) whose ioctls are faked
++ *     (BINDER_VERSION, BINDER_WRITE_READ parks the caller, everything
++ *     else returns success).
+  *   - getpid() returns the virtual pid from $GBVPID; fork() children
+  *     claim the next vpid prepared by the parent; the parent keeps the
+  *     real pid as its return value and records the real<->virtual map
+@@ -685,10 +687,24 @@ static int gb_translate_arg(long *args, int idx)
+     return 0;
+ }
+ 
+-/* /dev/binder: hand out a dummy fd. Returns 1 when handled. */
++/* /dev/binder: hand out an fd on the skeleton backing file
++ * ($GBROOT/dev/binder, a plain file pre-created by
++ * assemble-rootfs.sh). GB servicemanager's binder_open sequence
++ * is open -> mmap(128 KiB) -> ioctl, and the mmap cannot land on
++ * the old /dev/null dummy fd: it died before ever reaching the
++ * WRITE_READ park (m1c field, gate-display-desk pre-cell). A
++ * plain file takes the mmap; the ioctl fakes keyed on the
++ * registered fd are unchanged. Returns 1 when handled. */
+ static int gb_pre_binder_open(long *skip_result)
+ {
+-    long fd = gb_raw_open("/dev/null", 2 /* O_RDWR */, 0);
++    char *t = gb_translate("/dev/binder");
++    long fd;
++    if (t == (char *) -1) {
++        *skip_result = -ENAMETOOLONG;
++        __gb_gate_handled++;
++        return 1;
++    }
++    fd = gb_raw_open(t, 2 /* O_RDWR */, 0);
+     if (fd >= 0) gb_binder_fd_add(fd);
+     *skip_result = fd;
+     __gb_gate_handled++;

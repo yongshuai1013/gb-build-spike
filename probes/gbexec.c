@@ -37,6 +37,7 @@
  */
 
 #include <elf.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
@@ -51,6 +52,40 @@ static void gb_die(const char *msg)
 {
     write(2, "gbexec: ", 8);
     write(2, msg, strlen(msg));
+    write(2, "\n", 1);
+    _exit(127);
+}
+
+/* Why the last gb_load() failed: the errno of the failing call,
+ * captured at the failure point (before any cleanup could clobber
+ * it), or a synthesized code for ELF sanity failures (ENOEXEC for
+ * a bad ident, EINVAL for an out-of-bounds phdr table, EIO for a
+ * short read). Telemetry only: the die lines name the path that
+ * could not be loaded so a field log can tell which dynamic
+ * binary's gbexec handoff failed (m1c field: one unattributed
+ * "cannot load target"). */
+static int gb_load_errno;
+
+static int gb_fail(int e)
+{
+    gb_load_errno = e;
+    return -1;
+}
+
+static void gb_die_path(const char *msg, const char *path)
+{
+    char digits[12];
+    int nd = 0, e = gb_load_errno;
+    write(2, "gbexec: ", 8);
+    write(2, msg, strlen(msg));
+    write(2, " ", 1);
+    write(2, path, strlen(path));
+    if (e > 0) {
+        write(2, " (errno ", 8);
+        while (e > 0) { digits[nd++] = (char) ('0' + e % 10); e /= 10; }
+        while (nd > 0) write(2, &digits[--nd], 1);
+        write(2, ")", 1);
+    }
     write(2, "\n", 1);
     _exit(127);
 }
@@ -74,19 +109,29 @@ static int gb_load(const char *path, Elf32_Addr dyn_bias,
     Elf32_Addr bias, minva = 0, phdr_addr = 0;
 
     fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
-    if (read(fd, &eh, sizeof(eh)) != (ssize_t) sizeof(eh)) { close(fd); return -1; }
-    if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0) { close(fd); return -1; }
+    if (fd < 0) return gb_fail(errno);
+    {
+        ssize_t n = read(fd, &eh, sizeof(eh));
+        if (n != (ssize_t) sizeof(eh)) {
+            int e = (n < 0) ? errno : EIO;
+            close(fd);
+            return gb_fail(e);
+        }
+    }
+    if (memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0) { close(fd); return gb_fail(ENOEXEC); }
     if (eh.e_phnum == 0 || eh.e_phoff == 0 ||
         eh.e_phoff + eh.e_phnum * sizeof(Elf32_Phdr) > sizeof(phbuf)) {
         close(fd);
-        return -1;
+        return gb_fail(EINVAL);
     }
-    if (lseek(fd, eh.e_phoff, SEEK_SET) < 0) { close(fd); return -1; }
-    if (read(fd, phbuf, eh.e_phnum * sizeof(Elf32_Phdr)) !=
-        (ssize_t) (eh.e_phnum * sizeof(Elf32_Phdr))) {
-        close(fd);
-        return -1;
+    if (lseek(fd, eh.e_phoff, SEEK_SET) < 0) { int e = errno; close(fd); return gb_fail(e); }
+    {
+        ssize_t n = read(fd, phbuf, eh.e_phnum * sizeof(Elf32_Phdr));
+        if (n != (ssize_t) (eh.e_phnum * sizeof(Elf32_Phdr))) {
+            int e = (n < 0) ? errno : EIO;
+            close(fd);
+            return gb_fail(e);
+        }
     }
 
     bias = (eh.e_type == ET_DYN) ? dyn_bias : 0;
@@ -118,7 +163,7 @@ static int gb_load(const char *path, Elf32_Addr dyn_bias,
             if (fsz_page_end > va) {
                 p = mmap((void *) va, fsz_page_end - va,
                          prot, MAP_PRIVATE | MAP_FIXED, fd, off);
-                if (p == MAP_FAILED) { close(fd); return -1; }
+                if (p == MAP_FAILED) { int e = errno; close(fd); return gb_fail(e); }
             }
             /* Zero the tail of the last file page beyond filesz,
              * then any whole anonymous pages up to memsz. */
@@ -131,7 +176,7 @@ static int gb_load(const char *path, Elf32_Addr dyn_bias,
                     p = mmap((void *) fsz_page_end, msz_end - fsz_page_end,
                              prot, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS,
                              -1, 0);
-                    if (p == MAP_FAILED) { close(fd); return -1; }
+                    if (p == MAP_FAILED) { int e = errno; close(fd); return gb_fail(e); }
                 }
             }
         }
@@ -171,9 +216,10 @@ int main(int argc, char **argv)
         targc = 1;
     }
 
-    if (gb_load(target_path, 0, &target) != 0) gb_die("cannot load target");
+    if (gb_load(target_path, 0, &target) != 0)
+        gb_die_path("cannot load target", target_path);
     if (gb_load("/system/bin/linker", GBEXEC_LINKER_BASE, &linker) != 0)
-        gb_die("cannot load linker");
+        gb_die_path("cannot load linker", "/system/bin/linker");
 
     /* Read our own auxv to clone the kernel-provided values. */
     auxc = 0;

@@ -34,6 +34,13 @@ for n in main radio events system; do
   : > "rootfs/dev/log/$n"
 done
 
+# /dev/binder backing file (gate-display-desk pre-cell, patch
+# 0005): the gate hands an fd on this plain file for /dev/binder,
+# and GB servicemanager mmaps 128 KiB on that fd during
+# binder_open - a mapping the old /dev/null dummy fd cannot
+# serve. 131072 bytes = 128 KiB = the mmap size = 32 pages.
+head -c 131072 /dev/zero > rootfs/dev/binder
+
 # The gate binaries must be inside: gbexec is load-bearing (the
 # compat execve rewrite points at /system/bin/gbexec), gate_smoke is
 # the on-device smoke binary.

@@ -62,7 +62,8 @@ checkout 回原版（並刪去新增檔），再依檔名序 `git apply`。目�
 - **裝置重定向**：`/dev/console`、`/dev/log/*` 靠路徑翻譯落 rootfs
   內一般檔案（rootfs 骨架預建，見 assemble-rootfs.sh），無專屬碼。
   `/dev/binder`：pre 直接以 raw svc 開宿主 `/dev/null` 交還並登記
-  dummy fd（dup 家族在 post 補登記、close 時銷記）。
+  dummy fd（dup 家族在 post 補登記、close 時銷記）。**（落點自
+  0005 起改指骨架一般檔案，見 0005 節；登記與 ioctl 假辦不變。）**
 - **ioctl 假辦**（僅 dummy binder fd）：`BINDER_VERSION`
   （0xC0046209，GB binder.h 為 _IOWR）填 protocol version 7 回 0；
   `BINDER_WRITE_READ`（0xC0186201）進 pause 迴圈停泊（servicemanager
@@ -172,6 +173,24 @@ qemu-smoke.sh phase 2 以真 init 跑 60 秒窗口斷言：程序仍存活、
 trace 覆蓋全程（qemu -D 獨立日誌，免被客體 dup2 引流）且無任何
 被禁 syscall 被發出、rc 執行指紋（on-init 的 /etc 符號連結）
 存在、dev/console 含 init 自己的日誌行。
+
+### 0005-gb-gate-binder-file.patch — /dev/binder 落點改一般檔案（只改 gb_gate.c）
+
+m1c 真機場判讀（gate-m1c-field-verify.md §3-丙）：servicemanager
+被拉起 ≥4 次反覆退出、從未在 binder 上停泊。死因首嫌（顯示案頭
+gate-display-desk §4 前置格對 GB servicemanager 的 binder.c 啟動
+序背書）：binder_open 是 **open → mmap(128 KiB) → ioctl**——mmap
+打在 0003 的 /dev/null dummy fd 上必失敗，它死在第一次
+WRITE_READ 停泊之前，與場形狀吻合。本補丁只動落點一處：
+
+| 檔案 | 改動 | 理由／行為差異 |
+|---|---|---|
+| `libc/arch-arm/bionic/gb_gate.c` | `gb_pre_binder_open` 改為以 raw svc 開路徑翻譯後的 `$GBROOT/dev/binder`（骨架一般檔案，assemble-rootfs.sh 預建 131072B＝128 KiB＝servicemanager 的 mmap 尺寸＝32 頁）；譯名溢出回 `-ENAMETOOLONG`（與 open 路徑同形）。檔頭註解同步。 | mmap MAP_PRIVATE 落一般檔案成立，servicemanager 得以走完 binder_open 抵達 WRITE_READ 停泊。**ioctl 假辦（VERSION／WRITE_READ 停泊／其餘回 0）與 fd 登記（dup 補記、close 銷記）逐字不動**；檔案不存在時 open 的真 errno 原樣回傳（形狀回到修前：servicemanager 退出），不另設 fallback。 |
+
+場判準（預註冊）：init 服務表 servicemanager 呈 running ∧
+console 無其 critical 行 ∧ 不再反覆重啟，三者齊才算此格成立；
+若仍退出，下一嫌疑回到 gbexec 交接（同版 gbexec 失敗行已帶
+路徑，可分判）。
 
 ## system-core
 
