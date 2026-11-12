@@ -52,6 +52,7 @@ symbols, this gets revisited with that evidence.
 | external/compiler-rt | libc depends on the libcompiler_rt-extras static library (make error, round 5) |
 | external/clang | build/core/llvm_config.mk (included unconditionally by config.mk) sets CLANG := out/host/linux-x86/bin/clang, and the only module defining that host binary is external/clang's source build; CLANG_CONFIG_EXTRA_TARGET_C_INCLUDES also points into external/clang/lib/include (rounds 6-7) |
 | external/llvm | external/clang links the LLVM libraries defined in this project |
+| external/gcc-demangle | libcorkscrew (system/core, under libutils) depends on libgccdemangle from this project (make error, round 8) |
 
 Correction log, round 7: round 6 guessed the prebuilt clang project
 (prebuilts/clang/linux-x86/host/3.3) would provide the host clang.

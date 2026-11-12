@@ -16,6 +16,7 @@ external/libselinux \
 external/compiler-rt \
 external/clang \
 external/llvm \
+external/gcc-demangle \
 prebuilts/sdk \
 prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.7 \
 prebuilts/gcc/linux-x86/arm/arm-eabi-4.7"
