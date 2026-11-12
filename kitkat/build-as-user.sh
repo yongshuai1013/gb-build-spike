@@ -12,19 +12,27 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 MODULES="libc linker init servicemanager libcutils libutils libbinder"
 
-# JDK banner shim (fix round 2). build/core/main.mk of 4.4.4_r2 hard-
-# stops if `java -version` output contains "openjdk" anywhere, even
-# though the version checks themselves (first line ^java .*1.6, javac
-# 1.6) pass with OpenJDK 6 — the same JDK the GB probe built a whole
-# tree with. The shim delegates everything to the real java and only
-# rewrites the -version banner's "OpenJDK" wording; all actual java
-# work runs on the unmodified OpenJDK 6 binaries. Recorded here and
-# in the report so the probe stays honest about it.
-SHIMDIR="$HOME/.kk-shims"
-mkdir -p "$SHIMDIR"
-cat > "$SHIMDIR/java" <<EOF
+# JDK banner shim (fix rounds 2-3). build/core/main.mk of 4.4.4_r2
+# hard-stops if `java -version` output contains "openjdk" anywhere,
+# even though the version checks themselves (first line ^java .*1.6,
+# javac 1.6) pass with OpenJDK 6 — the same JDK the GB probe built a
+# whole tree with. Round 2 put the shim on PATH, but envsetup.sh's
+# lunch always re-fronts $JAVA_HOME/bin ahead of any PATH entry, so
+# the shim never won. Round 3 therefore puts the shim INSIDE a
+# symlink clone of the JDK and points JAVA_HOME at the clone: every
+# tool stays the real OpenJDK 6 binary (symlink), only bin/java is a
+# script that delegates everything to the real java and rewrites the
+# -version banner's "OpenJDK" wording. Recorded here and in the
+# report so the probe stays honest about it.
+REAL_JAVA_HOME="$JAVA_HOME"
+FAKE_JDK="$HOME/.kk-jdk"
+rm -rf "$FAKE_JDK"
+mkdir -p "$FAKE_JDK"
+cp -rs "$REAL_JAVA_HOME"/* "$FAKE_JDK"/
+rm "$FAKE_JDK/bin/java"
+cat > "$FAKE_JDK/bin/java" <<EOF
 #!/bin/sh
-REAL="$JAVA_HOME/bin/java"
+REAL="$REAL_JAVA_HOME/bin/java"
 if [ "\$1" = "-version" ]; then
   OUT=\$("\$REAL" "\$@" 2>&1); RC=\$?
   printf '%s\n' "\$OUT" | sed 's/OpenJDK/Java/g; s/openjdk/java/g' 1>&2
@@ -32,9 +40,10 @@ if [ "\$1" = "-version" ]; then
 fi
 exec "\$REAL" "\$@"
 EOF
-chmod +x "$SHIMDIR/java"
-export PATH="$SHIMDIR:$PATH"
-echo "java banner shim active: -version output has OpenJDK->Java wording only; binary is $JAVA_HOME/bin/java" \
+chmod +x "$FAKE_JDK/bin/java"
+export JAVA_HOME="$FAKE_JDK"
+export PATH="$JAVA_HOME/bin:$PATH"
+echo "java banner shim active inside JAVA_HOME clone $FAKE_JDK (real JDK: $REAL_JAVA_HOME); only the -version banner wording is rewritten" \
   >> /report/environment.txt
 
 set -x

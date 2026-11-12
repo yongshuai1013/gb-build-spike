@@ -40,7 +40,10 @@ the same JDK the GB probe built a full tree with. Fix is a build-time
 `java` shim that only rewrites the -version banner wording and
 delegates everything else to the real binary (see build-as-user.sh);
 classified as a toolchain/host-environment formality, not a tree or
-compiler problem. Round 1 assumed libselinux would pull in external/pcre
+compiler problem. Round 3: a PATH shim cannot win — envsetup's lunch
+re-fronts $JAVA_HOME/bin ahead of PATH — so the shim moved inside a
+symlink clone of the JDK and JAVA_HOME points at the clone (every
+tool a symlink to the real binary except bin/java). Round 1 assumed libselinux would pull in external/pcre
 (upstream libselinux uses pcre for label matching). The 4.4.4_r2
 manifest contains no external/pcre project at all (`repo sync`:
 "project external/pcre not found") — the Android fork of libselinux
