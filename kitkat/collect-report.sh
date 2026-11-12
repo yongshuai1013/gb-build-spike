@@ -45,7 +45,7 @@ echo "$PEAK_LINE" > report/disk-peak.txt
   echo
   cat report/verify.txt 2>/dev/null || echo "verify.txt missing (build never reached verification)"
   echo
-  grep -q "ALL MODULES OK" report/verify.txt 2>/dev/null \
+  grep -q "ALL MODULES OK" report/verdict.txt 2>/dev/null \
     && echo "ALL MODULES OK" || echo "NOT ALL MODULES OK"
 } > report/SUMMARY.txt
 cat report/SUMMARY.txt
