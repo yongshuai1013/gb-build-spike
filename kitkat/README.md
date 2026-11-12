@@ -32,7 +32,13 @@ workflow only triggers on pushes to `kitkat-parts`.
 | frameworks/native | servicemanager, libbinder, libutils |
 | system/extras | init → fs_mgr → libext4_utils (ext4_utils lives in system/extras) |
 | external/libselinux | init and servicemanager SELinux checks |
-| external/pcre | libselinux label matching |
+
+Correction log: round 1 assumed libselinux would pull in external/pcre
+(upstream libselinux uses pcre for label matching). The 4.4.4_r2
+manifest contains no external/pcre project at all (`repo sync`:
+"project external/pcre not found") — the Android fork of libselinux
+does not use pcre. Row removed; if a later link error names pcre
+symbols, this gets revisited with that evidence.
 | prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.7 | target userspace compiler named by build/core combo config |
 | prebuilts/gcc/linux-x86/arm/arm-eabi-4.7 | kernel toolchain the combo config references at parse time |
 

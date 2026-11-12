@@ -52,4 +52,4 @@ jobs:
         if: always()
         run: |
           cat report/SUMMARY.txt || true
-          grep -q "ALL MODULES OK" report/SUMMARY.txt
+          grep -qx "ALL MODULES OK" report/SUMMARY.txt

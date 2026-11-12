@@ -12,7 +12,7 @@ mkdir -p report aosp
 cd aosp
 
 PROJECTS="build bionic system/core frameworks/native system/extras \
-external/libselinux external/pcre \
+external/libselinux \
 prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.7 \
 prebuilts/gcc/linux-x86/arm/arm-eabi-4.7"
 
