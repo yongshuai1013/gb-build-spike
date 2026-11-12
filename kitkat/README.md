@@ -50,7 +50,14 @@ manifest contains no external/pcre project at all (`repo sync`:
 does not use pcre. Row removed; if a later link error names pcre
 symbols, this gets revisited with that evidence.
 | external/compiler-rt | libc depends on the libcompiler_rt-extras static library (make error, round 5) |
-| prebuilts/clang/linux-x86/host/3.3 | external/compiler-rt builds with LOCAL_CLANG := true; the build expects the prebuilt host clang from this project (make error, round 6) |
+| external/clang | build/core/llvm_config.mk (included unconditionally by config.mk) sets CLANG := out/host/linux-x86/bin/clang, and the only module defining that host binary is external/clang's source build; CLANG_CONFIG_EXTRA_TARGET_C_INCLUDES also points into external/clang/lib/include (rounds 6-7) |
+| external/llvm | external/clang links the LLVM libraries defined in this project |
+
+Correction log, round 7: round 6 guessed the prebuilt clang project
+(prebuilts/clang/linux-x86/host/3.3) would provide the host clang.
+It does not: at this tag the project syncs as an 8 KB empty checkout
+and carries no Android.mk at any checked revision. Removed from the
+set; the real provider is external/clang (source build) + external/llvm.
 | prebuilts/sdk | build/core/config.mk derives TARGET_AVAILABLE_SDK_VERSIONS from prebuilts/sdk/*/android.jar; without it every Java module's LOCAL_SDK_VERSION check fails at parse time (found round 4 via frameworks/native/opengl/tests) |
 | prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.7 | target userspace compiler named by build/core combo config |
 | prebuilts/gcc/linux-x86/arm/arm-eabi-4.7 | kernel toolchain the combo config references at parse time |
