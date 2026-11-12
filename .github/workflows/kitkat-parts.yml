@@ -1,0 +1,55 @@
+name: kitkat-parts-build
+
+# Parts-only KitKat probe. Lives on branch kitkat-parts of gb-build-spike;
+# main does not carry this workflow and is never touched by it.
+# Pre-registered verdict criteria: see kitkat/README.md.
+# Note: workflow_dispatch is listed for completeness, but GitHub only
+# allows dispatching workflows that also exist on the default branch;
+# pushes to kitkat-parts are the working trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [kitkat-parts]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: Check out spike repo (kitkat-parts branch)
+        uses: actions/checkout@v4
+
+      - name: Disk baseline
+        run: df -h . ; df -B1 --output=avail . | tail -1
+
+      - name: Install repo tool (host)
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Partial sync of android-4.4.4_r2 (minimal project set)
+        run: bash kitkat/sync-parts.sh
+
+      - name: Build target modules in era container (Ubuntu 12.04)
+        run: bash kitkat/build-parts.sh
+
+      - name: Collect report
+        if: always()
+        run: bash kitkat/collect-report.sh
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitkat-parts-report
+          path: report/
+          if-no-files-found: warn
+
+      - name: Verdict (fails the run unless every module verified)
+        if: always()
+        run: |
+          cat report/SUMMARY.txt || true
+          grep -q "ALL MODULES OK" report/SUMMARY.txt
