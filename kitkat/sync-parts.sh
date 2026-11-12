@@ -14,6 +14,7 @@ cd aosp
 PROJECTS="build bionic system/core frameworks/native system/extras \
 external/libselinux \
 external/compiler-rt \
+prebuilts/clang/linux-x86/host/3.3 \
 prebuilts/sdk \
 prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.7 \
 prebuilts/gcc/linux-x86/arm/arm-eabi-4.7"
