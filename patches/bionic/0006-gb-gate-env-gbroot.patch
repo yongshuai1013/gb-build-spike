@@ -1,0 +1,57 @@
+diff --git a/libc/arch-arm/bionic/gb_gate.c b/libc/arch-arm/bionic/gb_gate.c
+index 105e674..af1d86e 100644
+--- a/libc/arch-arm/bionic/gb_gate.c
++++ b/libc/arch-arm/bionic/gb_gate.c
+@@ -480,6 +480,7 @@ static char *gb_exec_argv[64];
+ static char *gb_exec_envp[128];
+ static char  gb_exec_env_vpid[40];
+ static char  gb_exec_env_ld[GB_PATH_MAX + 32];
++static char  gb_exec_env_root[GB_PATH_MAX + 16];
+ 
+ /* Build "GBVPID=<n>" into gb_exec_env_vpid. */
+ static void gb_make_vpid_env(void)
+@@ -496,19 +497,23 @@ static void gb_make_vpid_env(void)
+ }
+ 
+ /* Build the child environment: the caller's entries minus any stale
+- * GBVPID/LD_LIBRARY_PATH, plus our GBVPID and an LD_LIBRARY_PATH that
+- * points inside the rootfs (host-absolute, so the guest linker, which
+- * performs no path translation, finds the guest libraries). Returns
+- * the array or NULL when there are too many entries. */
++ * GBROOT/GBVPID/LD_LIBRARY_PATH, plus our GBROOT (0006: GB init builds
++ * service environments from scratch and never copies its own GBROOT
++ * into them, so without this every leaf process resolves the gate
++ * OFF), our GBVPID and an LD_LIBRARY_PATH that points inside the
++ * rootfs (host-absolute, so the guest linker, which performs no path
++ * translation, finds the guest libraries). Returns the array or NULL
++ * when there are too many entries. */
+ static char **gb_build_env(char *const *envp)
+ {
+     int n = 0, out = 0;
+     if (envp) {
+         while (envp[n]) {
+             const char *e = envp[n];
+-            if (gb_strncmp(e, "GBVPID=", 7) != 0 &&
++            if (gb_strncmp(e, "GBROOT=", 7) != 0 &&
++                gb_strncmp(e, "GBVPID=", 7) != 0 &&
+                 gb_strncmp(e, "LD_LIBRARY_PATH=", 16) != 0) {
+-                if (out >= 125) return 0;
++                if (out >= 124) return 0;
+                 gb_exec_envp[out++] = (char *) e;
+             }
+             n++;
+@@ -516,6 +521,14 @@ static char **gb_build_env(char *const *envp)
+     }
+     gb_make_vpid_env();
+     gb_exec_envp[out++] = gb_exec_env_vpid;
++    {
++        const char *p = "GBROOT=";
++        int i = 0, j = 0;
++        while (p[i]) { gb_exec_env_root[i] = p[i]; i++; }
++        while (gb_root[j]) { gb_exec_env_root[i++] = gb_root[j++]; }
++        gb_exec_env_root[i] = 0;
++    }
++    gb_exec_envp[out++] = gb_exec_env_root;
+     {
+         const char *p = "LD_LIBRARY_PATH=";
+         int i = 0, j = 0;

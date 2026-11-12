@@ -192,6 +192,32 @@ console 無其 critical 行 ∧ 不再反覆重啟，三者齊才算此格成立
 若仍退出，下一嫌疑回到 gbexec 交接（同版 gbexec 失敗行已帶
 路徑，可分判）。
 
+### 0006-gb-gate-env-gbroot.patch — execve 環境補注入 GBROOT（只改 gb_gate.c）
+
+m1d 場判讀（gate-m1d-field-verify.md）：0005 後 servicemanager
+仍退出 4 次至 critical、次數形狀零變化。其後案頭對版定讞
+（gate-svm-desk.md）：死因不在 binder 序內，在序之前的環境——
+GB init 給服務子行程的環境是從零自建的 `ENV[32]` 陣列，本人
+自 GateService 繼承的 GBROOT 從不被抄入；gb_build_env 只注入
+GBVPID 與 LD_LIBRARY_PATH、不注入 GBROOT。於是 leaf 行程首次
+樁呼叫即定案 gate 關閉（mode=2），整條 binder 序走宿主語義：
+open 落宿主真 /dev/binder、SET_CONTEXT_MGR 撞宿主已佔用的
+context manager 回 -EBUSY、main return -1 退出。0005 的落點
+在 gate 關時根本沒被執行到（非其形狀有誤，gate 開通後仍是
+必要件）。本補丁只動 gb_build_env 一處：
+
+| 檔案 | 改動 | 理由／行為差異 |
+|---|---|---|
+| `libc/arch-arm/bionic/gb_gate.c` | `gb_build_env` 比照 GBVPID 先例補注入 `GBROOT=<gb_root>`（新增專用緩衝 `gb_exec_env_root` 比照 `gb_exec_env_vpid`／`gb_exec_env_ld` 形狀）；複製既有環境時一併剔除舊 `GBROOT=` 條目防重複；容量守衛隨尾端條目由 2 增至 3 收緊一格（125→124）。 | 任何經 gate execve 拉起的行程 leaf env 必含 GBROOT → gate 定案開啟（mode=1）→ 0005 落點、mmap、SET_CONTEXT_MGR 假辦、WRITE_READ 停泊方得執行。**init／init.rc／gbexec／GateService／ioctl 假辦／0005 落點逐字不動。** 連帶登記（不作判準）：ueventd 經 execve 同樣首次拿到 GBROOT、其 gate 將首次開啟，死形可能改變，下一場只記觀察。 |
+
+場判準（預註冊，gate-svm-desk §6 原文重申）：場長 ≥120 秒 ∧
+console 全文無 `critical process 'servicemanager' exited` 行
+且 servicemanager 退出次數 = 0 ∧ init 本體續行（rc=159 零
+出現、場尾仍在回收 untracked pid），三者齊 → 前置格成立、
+顯示第一格解鎖。**判負觸發**：若仍見 servicemanager 退出
+（任何次數），env 假說判負，下一版直接轉證據版（規格見
+gate-svm-desk §6），不再出行為修法。
+
 ## system-core
 
 ### 0001-ueventd-no-uevent-idle.patch
