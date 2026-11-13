@@ -174,6 +174,7 @@ public class MainActivity extends Activity {
         addIfFile(files, new File(logs, "status.txt"));
         File gbroot = RootfsInstaller.gbroot(this);
         addIfFile(files, new File(gbroot, "dev/console"));
+        addIfFile(files, new File(gbroot, "dev/gate-trace"));
         addIfFile(files, new File(gbroot, ".asset-sha256"));
         File guestLogDir = new File(gbroot, "dev/log");
         File[] gl = guestLogDir.listFiles();

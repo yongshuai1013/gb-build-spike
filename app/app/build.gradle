@@ -19,8 +19,8 @@ android {
         // Termux policy). The GB guest rootfs lives in filesDir/gbroot
         // and gbroot/init is exec'd from there, so do NOT raise this.
         targetSdk 28
-        versionCode 4
-        versionName '0.1.1-m1e'
+        versionCode 5
+        versionName '0.1.1-m1f'
     }
 
     signingConfigs {
