@@ -30,6 +30,12 @@ cp -a "${PD}system/." rootfs/system/
 # Skeleton the guest (and the app launcher) rely on.
 mkdir -p rootfs/data rootfs/dev/log rootfs/dev/socket
 : > rootfs/dev/console
+# Gate-trace file (patch 0007, evidence build): the gate appends
+# binder-startup records here at runtime. Pre-created empty so the
+# host app's log export always carries it - "file present, zero
+# lines" and "file missing" must stay distinguishable in a field
+# package, because a gated-off process leaves no lines at all.
+: > rootfs/dev/gate-trace
 for n in main radio events system; do
   : > "rootfs/dev/log/$n"
 done

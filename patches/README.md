@@ -218,6 +218,29 @@ console 全文無 `critical process 'servicemanager' exited` 行
 （任何次數），env 假說判負，下一版直接轉證據版（規格見
 gate-svm-desk §6），不再出行為修法。
 
+### 0007-gb-gate-evidence.patch — 證據版遙測（只加記帳與 stderr 改道、行為零改）
+
+m1e 場判讀（gate-m1e-field-verify.md）：env 假說判負——GBROOT
+注入後 servicemanager 仍退出 4 次同形，觸及 0006 節預註冊的
+判負觸發，下一版直轉證據版。規格照 gate-svm-desk §6／場鑑識
+§3 原文，本補丁只加遙測、不提任何新假說、不修任何行為：
+
+| 檔案 | 改動 | 理由／行為差異 |
+|---|---|---|
+| `libc/arch-arm/bionic/gb_gate.c` | 新增 `gb_trace()`：在三處各追加一行到 `$GBROOT/dev/gate-trace`——(a) open／openat 的 `/dev/binder` 處理入口與出口、(b) binder fd 上的 `BINDER_SET_CONTEXT_MGR`、(c) 首個 `BINDER_WRITE_READ`（停泊前記、無回值可記）。每行欄位：`gt pid=<真pid> ev=<open-enter｜open-exit｜set-context-mgr｜first-write-read> req=</dev/binder｜0x........> ret=<n｜-> errno=<n｜-> mode=<__gb_gate_mode 當下值>`。寫入全走 raw svc（自組完整宿主路徑、O_WRONLY｜O_CREAT｜O_APPEND、每行一次 write），任何失敗靜默——遙測不得改 guest 所見回值。gate 在某行程關閉時其樁不進 pre，該行程不留任何行，**缺席本身就是 mode 證據**（場鑑識 §3 第一判讀點）。 | 死點落在哪一步下一場直接可判：先分「gate 在 leaf 仍未開」（無其 pid 的任何行）與「gate 已開、死在其後」（open-exit 的 fd／errno、set-context-mgr 的 ret、first-write-read 有無逐格往下對）。**假辦形狀與回值逐字不動**：SET_CONTEXT_MGR 記的是它本來就回的 0；WRITE_READ 照舊停泊。 |
+| 同上 | `gb_pre_execve` 對目標恰為 `/system/bin/servicemanager` 一個二進位，在發射前把 fd 2 改指 `$GBROOT/dev/console` 同檔（raw open O_WRONLY｜O_APPEND 後 dup2 到 2；失敗靜默、原樣放行）。 | servicemanager 本人輸出連續三場缺席（stderr 被 init 的 zap_stdio 送 /dev/null）。改道選 **gate 側**而非 GateService 側：GateService 的 ProcessBuilder 只能收它直屬的 guest init 輸出，servicemanager 是 guest 內孫行程、其 fd 2 在宿主側無把手；gb_pre_execve 就跑在那個已 zap 的子行程裡、是唯一能改道的點。fd 以 O_APPEND 開，不覆寫 console 檔另一寫者（__kmsg__ fd）的內容。**只動這一個二進位的 fd 2**，其 argv／env／路徑改寫逐字不動。連帶（宿主側、非本補丁）：assemble-rootfs.sh 預建空 `dev/gate-trace`、宿主 App 導出 zip 加入 `dev/gate-trace`（比照 dev/console 導出面），使「檔在、零行」與「檔缺席」在場包裡分得開。 |
+
+判讀口徑（預寫，下一場照此判）：gate-trace 有 servicemanager
+真 pid 的 open-enter 行 → gate 在 leaf 已開；open-exit 的
+ret ≥0 → binder 背景檔開成、死點在其後；ret <0 帶 errno →
+開檔即死、看 errno 分判（ENOENT＝背景檔不在、ENAMETOOLONG＝
+譯名溢出）；有 set-context-mgr（ret=0）而無 first-write-read
+→ 死在 SET_CONTEXT_MGR 與首個 WRITE_READ 之間（mmap 面）；
+first-write-read 在場 → binder 啟動序全走完、它已停泊，退出
+另有其因（不在 binder 序內）；全檔無其 pid 的行 → gate 在
+leaf 仍未開（env 注入未達此行程或定案更早被其他樁關閉），
+另從 dev/console 讀它本人的 perror 行對版。
+
 ## system-core
 
 ### 0001-ueventd-no-uevent-idle.patch

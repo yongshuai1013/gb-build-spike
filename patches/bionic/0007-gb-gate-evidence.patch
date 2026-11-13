@@ -1,0 +1,224 @@
+diff --git a/libc/arch-arm/bionic/gb_gate.c b/libc/arch-arm/bionic/gb_gate.c
+index af1d86e..4dc2df2 100644
+--- a/libc/arch-arm/bionic/gb_gate.c
++++ b/libc/arch-arm/bionic/gb_gate.c
+@@ -19,6 +19,14 @@
+  *     which a /dev/null dummy cannot serve) whose ioctls are faked
+  *     (BINDER_VERSION, BINDER_WRITE_READ parks the caller, everything
+  *     else returns success).
++ *   - evidence build (0007, telemetry only): three gate-trace points
++ *     append one line each to $GBROOT/dev/gate-trace around the
++ *     binder startup sequence (the /dev/binder open, the
++ *     BINDER_SET_CONTEXT_MGR, the first BINDER_WRITE_READ), and
++ *     servicemanager's stderr is repointed at execve time from
++ *     /dev/null to the console file so its own perror output reaches
++ *     the host log export. No fake, landing point or return value
++ *     changes anywhere.
+  *   - getpid() returns the virtual pid from $GBVPID; fork() children
+  *     claim the next vpid prepared by the parent; the parent keeps the
+  *     real pid as its return value and records the real<->virtual map
+@@ -180,6 +188,11 @@ static long gb_raw_read(long fd, void *buf, long count)
+     return gb_raw6(__NR_read, fd, (long) buf, count, 0, 0, 0);
+ }
+ 
++static long gb_raw_write(long fd, const void *buf, long count)
++{
++    return gb_raw6(__NR_write, fd, (long) buf, count, 0, 0, 0);
++}
++
+ static long gb_raw_close(long fd)
+ {
+     return gb_raw6(__NR_close, fd, 0, 0, 0, 0, 0);
+@@ -267,6 +280,105 @@ static char *gb_env_get(const char *name)
+     return 0;
+ }
+ 
++/* ---- gate-trace (0007): evidence-build telemetry ----
++ *
++ * Three points of the binder startup sequence append one line each
++ * to $GBROOT/dev/gate-trace:
++ *   open-enter / open-exit   around the /dev/binder open handling
++ *   set-context-mgr          BINDER_SET_CONTEXT_MGR on a binder fd
++ *   first-write-read         the first BINDER_WRITE_READ (which then
++ *                            parks and never returns, hence no ret)
++ * Line shape: "gt pid=<real> ev=<name> req=<path|0x........>
++ * ret=<n|-> errno=<n|-> mode=<n>", mode being __gb_gate_mode at
++ * write time. All I/O is raw syscalls on the fully composed host
++ * path, and every failure is silent: a trace that cannot be written
++ * must never change the value the guest sees. When the gate is off
++ * in a process its stubs never enter __gb_gate_pre(), so that
++ * process leaves no lines at all - the absence is itself the mode
++ * evidence the field read looks for. */
++#define GB_EV_OPEN_ENTER 1
++#define GB_EV_OPEN_EXIT  2
++#define GB_EV_SET_CTX    3
++#define GB_EV_FIRST_WR   4
++
++static int gb_trace_wr_seen = 0;
++
++static char *gb_fmt_dec(char *p, long v)
++{
++    char tmp[24];
++    int i = 0;
++    if (v < 0) { *p++ = '-'; v = -v; }
++    if (v == 0) tmp[i++] = '0';
++    while (v > 0) { tmp[i++] = (char) ('0' + (v % 10)); v /= 10; }
++    while (i > 0) *p++ = tmp[--i];
++    return p;
++}
++
++static char *gb_fmt_hex(char *p, unsigned int v)
++{
++    static const char hexd[] = "0123456789abcdef";
++    int i;
++    *p++ = '0'; *p++ = 'x';
++    for (i = 7; i >= 0; i--) *p++ = hexd[(v >> (i * 4)) & 15];
++    return p;
++}
++
++static char *gb_fmt_str(char *p, const char *s)
++{
++    while (*s) *p++ = *s++;
++    return p;
++}
++
++static void gb_trace(int ev, const char *req_path, unsigned int req_code,
++                     long ret, long err, int has_ret)
++{
++    char path[GB_PATH_MAX];
++    char line[256];
++    char *p = line;
++    int i = 0, j = 0;
++    long fd;
++
++    if (gb_root_len == 0) return;
++    while (gb_root[i]) { path[j++] = gb_root[i++]; }
++    {
++        const char *sfx = "/dev/gate-trace";
++        int k = 0;
++        while (sfx[k]) path[j++] = sfx[k++];
++    }
++    path[j] = 0;
++
++    p = gb_fmt_str(p, "gt pid=");
++    p = gb_fmt_dec(p, gb_raw_getpid());
++    p = gb_fmt_str(p, " ev=");
++    switch (ev) {
++    case GB_EV_OPEN_ENTER: p = gb_fmt_str(p, "open-enter"); break;
++    case GB_EV_OPEN_EXIT:  p = gb_fmt_str(p, "open-exit"); break;
++    case GB_EV_SET_CTX:    p = gb_fmt_str(p, "set-context-mgr"); break;
++    case GB_EV_FIRST_WR:   p = gb_fmt_str(p, "first-write-read"); break;
++    default:               p = gb_fmt_str(p, "?"); break;
++    }
++    p = gb_fmt_str(p, " req=");
++    if (req_path) p = gb_fmt_str(p, req_path);
++    else p = gb_fmt_hex(p, req_code);
++    if (has_ret) {
++        p = gb_fmt_str(p, " ret=");
++        p = gb_fmt_dec(p, ret);
++        p = gb_fmt_str(p, " errno=");
++        p = gb_fmt_dec(p, err);
++    } else {
++        p = gb_fmt_str(p, " ret=- errno=-");
++    }
++    p = gb_fmt_str(p, " mode=");
++    p = gb_fmt_dec(p, __gb_gate_mode);
++    *p++ = '\n';
++
++    /* O_WRONLY|O_CREAT|O_APPEND: one raw write per line. */
++    fd = gb_raw_open(path, 01 | 0100 | 02000, 0666);
++    if (fd < 0) return;
++    gb_raw_write(fd, line, p - line);
++    gb_raw_close(fd);
++}
++
+ /* ---- spinlock via the ARM kernel cmpxchg helper (works on ARMv5) ---- */
+ 
+ typedef int (*gb_cmpxchg_t)(int oldval, int newval, volatile int *ptr);
+@@ -610,6 +722,36 @@ static long gb_pre_execve(long *args, long *skip_result)
+      * array built below points at the guest path, not the slot. */
+     gb_strcpy(gb_exec_tpath, tpath);
+ 
++    /* 0007 (evidence build): servicemanager's own output has been
++     * missing from every field package so far - GB init zaps the
++     * stdio of every service child to /dev/null before execve, and
++     * its /dev/log channel never carried a byte either. This pre
++     * handler runs in that same child, after the zap: fd 2 currently
++     * IS /dev/null. Repoint it at the console file (the same file
++     * /dev/__kmsg__ lands on, already in the host log export) for
++     * this one binary only, so its perror lines reach the next
++     * field package. The fd uses O_APPEND so its writes never
++     * clobber the console file's other writer. Nothing else about
++     * the exec changes; any failure here is silent and the exec
++     * proceeds untouched. */
++    if (gb_strcmp(path, "/system/bin/servicemanager") == 0) {
++        char cpath[GB_PATH_MAX];
++        int i = 0, j = 0;
++        long cfd;
++        while (gb_root[i]) { cpath[j++] = gb_root[i++]; }
++        {
++            const char *sfx = "/dev/console";
++            int k = 0;
++            while (sfx[k]) cpath[j++] = sfx[k++];
++        }
++        cpath[j] = 0;
++        cfd = gb_raw_open(cpath, 01 | 02000 /* O_WRONLY|O_APPEND */, 0);
++        if (cfd >= 0 && cfd != 2) {
++            gb_raw6(__NR_dup2, cfd, 2, 0, 0, 0, 0);
++            gb_raw_close(cfd);
++        }
++    }
++
+     new_env = gb_build_env((char *const *) args[2]);
+     dyn = gb_has_interp(gb_exec_tpath);
+     if (dyn == 1) {
+@@ -824,7 +966,10 @@ long __gb_gate_pre(long nr, long *args, long *skip_result)
+     if (nr == __NR_open) {
+         const char *p = (const char *) args[0];
+         if (p && gb_strcmp(p, "/dev/binder") == 0) {
++            gb_trace(GB_EV_OPEN_ENTER, "/dev/binder", 0, 0, 0, 0);
+             gb_pre_binder_open(skip_result);
++            gb_trace(GB_EV_OPEN_EXIT, "/dev/binder", 0, *skip_result,
++                     *skip_result < 0 ? -*skip_result : 0, 1);
+             return GB_ACT_SKIP_SVC;
+         }
+         if (p && gb_strcmp(p, "/dev/__kmsg__") == 0) {
+@@ -855,7 +1000,10 @@ long __gb_gate_pre(long nr, long *args, long *skip_result)
+     if (nr == __NR_openat) {
+         const char *p = (const char *) args[1];
+         if (p && gb_strcmp(p, "/dev/binder") == 0) {
++            gb_trace(GB_EV_OPEN_ENTER, "/dev/binder", 0, 0, 0, 0);
+             gb_pre_binder_open(skip_result);
++            gb_trace(GB_EV_OPEN_EXIT, "/dev/binder", 0, *skip_result,
++                     *skip_result < 0 ? -*skip_result : 0, 1);
+             return GB_ACT_SKIP_SVC;
+         }
+         if (gb_translate_arg(args, 1) != 0) {
+@@ -876,6 +1024,14 @@ long __gb_gate_pre(long nr, long *args, long *skip_result)
+                 return GB_ACT_SKIP_SVC;
+             }
+             if (req == GB_BINDER_WRITE_READ) {
++                /* 0007: record the first WRITE_READ before parking;
++                 * the park never returns, so the line carries no
++                 * return value. Later WRITE_READs (other threads)
++                 * are not recorded - the spec asks for the first. */
++                if (!gb_trace_wr_seen) {
++                    gb_trace_wr_seen = 1;
++                    gb_trace(GB_EV_FIRST_WR, 0, req, 0, 0, 0);
++                }
+                 /* Park the caller like a thread blocked in the binder
+                  * driver: the process stays alive (servicemanager in
+                  * its binder_loop) but no transfer is implemented.
+@@ -886,7 +1042,11 @@ long __gb_gate_pre(long nr, long *args, long *skip_result)
+                 for (;;) gb_raw_sigsuspend(gb_no_mask);
+             }
+             /* SET_MAX_THREADS, SET_CONTEXT_MGR and anything else on
+-             * the dummy fd: succeed silently. */
++             * the dummy fd: succeed silently. 0007: SET_CONTEXT_MGR
++             * is one of the gate-trace points; its faked return
++             * value (0) is recorded, not changed. */
++            if (req == GB_BINDER_SET_CONTEXT_MGR)
++                gb_trace(GB_EV_SET_CTX, 0, req, 0, 0, 1);
+             *skip_result = 0;
+             __gb_gate_handled++;
+             return GB_ACT_SKIP_SVC;
